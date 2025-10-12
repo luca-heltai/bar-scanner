@@ -73,6 +73,10 @@
             cursor: not-allowed;
         }
 
+        #switchCameraButton {
+            display: none;
+        }
+
         textarea {
             width: 100%;
             min-height: 150px;
@@ -99,6 +103,59 @@
         .success {
             color: #27ae60;
         }
+
+        .history-section {
+            margin-top: 30px;
+            border-top: 2px solid #e0e0e0;
+            padding-top: 20px;
+        }
+
+        .history-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .history-title {
+            color: #333;
+            font-size: 20px;
+            font-weight: 600;
+            margin: 0;
+        }
+
+        #clearHistoryButton {
+            width: auto;
+            padding: 10px 20px;
+            font-size: 14px;
+            margin-bottom: 0;
+            background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
+        }
+
+        #clearHistoryButton:hover:not(:disabled) {
+            background: linear-gradient(135deg, #c0392b 0%, #a93226 100%);
+        }
+
+        #scanHistory {
+            width: 100%;
+            min-height: 200px;
+            max-height: 400px;
+            padding: 15px;
+            font-size: 14px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            resize: vertical;
+            font-family: 'Courier New', monospace;
+            background: #f9f9f9;
+            overflow-y: auto;
+        }
+
+        .empty-history {
+            color: #999;
+            font-style: italic;
+            text-align: center;
+            padding: 40px 20px;
+        }
     </style>
 </head>
 
@@ -107,8 +164,17 @@
         <h1>📱 Bar Scanner</h1>
         <div id="reader"></div>
         <button id="scanButton">Scan</button>
+        <button id="switchCameraButton">Switch Camera</button>
         <textarea id="result" readonly placeholder="Scanned codes will appear here..."></textarea>
         <div id="status" class="status"></div>
+
+        <div class="history-section">
+            <div class="history-header">
+                <h2 class="history-title">📊 Scan History</h2>
+                <button id="clearHistoryButton">Clear History</button>
+            </div>
+            <div id="scanHistory" class="empty-history">No scans yet. Start scanning to build your history!</div>
+        </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"
@@ -124,6 +190,12 @@
             let activeScanner = null;
             let successMessageTimeoutId = null;
             let barcodeVideoElement = null;
+            let html5CameraList = [];
+            let cameraIndex = -1;
+            let html5HasMultipleCameras = false;
+            const fallbackFacingModes = ['environment', 'user'];
+            let fallbackFacingIndex = 0;
+            let fallbackCameraCount = 0;
 
             const recentResults = new Map();
             const RESULT_DEBOUNCE_MS = 1500;
@@ -133,6 +205,93 @@
             const resultTextarea = document.getElementById('result');
             const readerDiv = document.getElementById('reader');
             const statusDiv = document.getElementById('status');
+            const switchCameraButton = document.getElementById('switchCameraButton');
+            const clearHistoryButton = document.getElementById('clearHistoryButton');
+            const scanHistoryDiv = document.getElementById('scanHistory');
+            switchCameraButton.disabled = true;
+
+            // Scan history storage
+            let scanHistory = [];
+            const MAX_HISTORY_ITEMS = 50;
+
+            function addToHistory(decodedText, codeType, timestamp) {
+                const historyItem = {
+                    text: decodedText,
+                    type: codeType,
+                    timestamp: timestamp,
+                    id: Date.now() + Math.random() // Simple unique ID
+                };
+
+                scanHistory.unshift(historyItem); // Add to beginning
+
+                // Keep only the most recent items
+                if (scanHistory.length > MAX_HISTORY_ITEMS) {
+                    scanHistory = scanHistory.slice(0, MAX_HISTORY_ITEMS);
+                }
+
+                updateHistoryDisplay();
+                saveHistoryToLocalStorage();
+            }
+
+            function updateHistoryDisplay() {
+                if (scanHistory.length === 0) {
+                    scanHistoryDiv.innerHTML = '<div class="empty-history">No scans yet. Start scanning to build your history!</div>';
+                    scanHistoryDiv.className = 'empty-history';
+                    return;
+                }
+
+                scanHistoryDiv.className = '';
+                let historyHTML = '';
+
+                scanHistory.forEach((item, index) => {
+                    const shortText = item.text.length > 60 ? item.text.substring(0, 60) + '...' : item.text;
+                    historyHTML += `
+                        <div style="margin-bottom: 15px; padding: 10px; background: white; border-radius: 8px; border-left: 4px solid #667eea;">
+                            <div style="font-weight: bold; color: #333; margin-bottom: 5px;">
+                                ${item.type} - ${item.timestamp}
+                            </div>
+                            <div style="font-family: 'Courier New', monospace; word-break: break-all; color: #555;">
+                                ${shortText}
+                            </div>
+                        </div>
+                    `;
+                });
+
+                scanHistoryDiv.innerHTML = historyHTML;
+            }
+
+            function clearHistory() {
+                scanHistory = [];
+                updateHistoryDisplay();
+                saveHistoryToLocalStorage();
+                setStatus('History cleared', 'success');
+                setTimeout(() => {
+                    if (statusDiv.textContent === 'History cleared') {
+                        setStatus('');
+                    }
+                }, 1500);
+            }
+
+            function saveHistoryToLocalStorage() {
+                try {
+                    localStorage.setItem('barScannerHistory', JSON.stringify(scanHistory));
+                } catch (err) {
+                    console.warn('Failed to save history to localStorage:', err);
+                }
+            }
+
+            function loadHistoryFromLocalStorage() {
+                try {
+                    const saved = localStorage.getItem('barScannerHistory');
+                    if (saved) {
+                        scanHistory = JSON.parse(saved);
+                        updateHistoryDisplay();
+                    }
+                } catch (err) {
+                    console.warn('Failed to load history from localStorage:', err);
+                    scanHistory = [];
+                }
+            }
 
             function setStatus(message, type = 'info') {
                 statusDiv.textContent = message;
@@ -149,6 +308,36 @@
                 } else {
                     statusDiv.className = 'status';
                 }
+            }
+
+            function updateSwitchCameraButton() {
+                const hasMultiple = (canUseHtml5Qrcode() && html5HasMultipleCameras) || fallbackCameraCount > 1;
+                if (hasMultiple) {
+                    switchCameraButton.style.display = '';
+                    switchCameraButton.disabled = !isScanning;
+                } else {
+                    switchCameraButton.style.display = 'none';
+                }
+            }
+
+            function describeCameraFromState(scanner = activeScanner) {
+                if (scanner === 'html5-qrcode' && html5CameraList.length > 0 && cameraIndex >= 0 && cameraIndex < html5CameraList.length) {
+                    const label = html5CameraList[cameraIndex].label;
+                    return label || `Camera ${cameraIndex + 1}`;
+                }
+
+                if (scanner === 'barcode-detector') {
+                    const facing = fallbackFacingModes[fallbackFacingIndex] || 'environment';
+                    return facing === 'user' ? 'Front camera' : 'Back camera';
+                }
+
+                if (html5CameraList.length > 0 && cameraIndex >= 0 && cameraIndex < html5CameraList.length) {
+                    const label = html5CameraList[cameraIndex].label;
+                    return label || `Camera ${cameraIndex + 1}`;
+                }
+
+                const fallbackFacing = fallbackFacingModes[fallbackFacingIndex] || 'environment';
+                return fallbackFacing === 'user' ? 'Front camera' : 'Back camera';
             }
 
             function recordResult(decodedText) {
@@ -178,28 +367,69 @@
                 return true;
             }
 
-            function handleSuccessfulScanUI() {
+            function detectCodeType(decodedText) {
+                // Simple heuristics to detect barcode/QR code types
+                if (!decodedText) return 'Unknown';
+
+                const text = decodedText.trim();
+
+                // QR Code patterns
+                if (text.startsWith('http://') || text.startsWith('https://')) return 'QR Code (URL)';
+                if (text.startsWith('mailto:')) return 'QR Code (Email)';
+                if (text.startsWith('tel:')) return 'QR Code (Phone)';
+                if (text.startsWith('wifi:')) return 'QR Code (WiFi)';
+                if (text.includes('\n') || text.length > 50) return 'QR Code (Text)';
+
+                // Barcode patterns based on length and format
+                if (/^\d{13}$/.test(text)) return 'EAN-13 Barcode';
+                if (/^\d{12}$/.test(text)) return 'UPC-A Barcode';
+                if (/^\d{8}$/.test(text)) return 'EAN-8 Barcode';
+                if (/^\d{6}$/.test(text)) return 'UPC-E Barcode';
+                if (/^[0-9A-Z\-\.\$\/\+\%\s]+$/.test(text) && text.length >= 3) return 'Code 39 Barcode';
+                if (/^[\x00-\x7F]+$/.test(text) && text.length >= 4) return 'Code 128 Barcode';
+
+                // Default based on content
+                if (/^\d+$/.test(text)) return 'Numeric Barcode';
+                if (text.length <= 20) return 'Barcode';
+
+                return 'QR Code';
+            }
+
+            function displayCodeInfo(decodedText, codeType) {
+                const timestamp = new Date().toLocaleString();
+                const codeInfo = `
+═══════════════════════════════════════
+📅 Scan Time: ${timestamp}
+🏷️  Code Type: ${codeType}
+📊 Raw Value: ${decodedText}
+📏 Length: ${decodedText.length} characters
+═══════════════════════════════════════
+
+`;
+                resultTextarea.value = codeInfo + resultTextarea.value;
+                resultTextarea.scrollTop = 0;
+
+                // Add to history
+                addToHistory(decodedText, codeType, timestamp);
+            }
+
+            function handleSuccessfulScanUI(decodedText, codeType) {
                 if (successMessageTimeoutId) {
                     clearTimeout(successMessageTimeoutId);
                 }
 
-                setStatus('✓ Code captured!', 'success');
-                successMessageTimeoutId = setTimeout(() => {
-                    successMessageTimeoutId = null;
-                    if (isScanning) {
-                        setStatus('Point camera at barcode or QR code');
-                    } else if (statusDiv.textContent === '✓ Code captured!') {
-                        setStatus('');
-                    }
-                }, 1200);
+                setStatus(`✓ ${codeType} captured! Camera stopped.`, 'success');
+                displayCodeInfo(decodedText, codeType);
+
+                // Stop scanning after successful capture
+                stopScanning().catch(err => {
+                    console.error('Failed to stop scanning after successful capture:', err);
+                });
             }
 
             function addResult(decodedText) {
-                const timestamp = new Date().toLocaleString();
-                const newEntry = `[${timestamp}] ${decodedText}\n`;
-                resultTextarea.value = newEntry + resultTextarea.value;
-                resultTextarea.scrollTop = 0;
-                handleSuccessfulScanUI();
+                const codeType = detectCodeType(decodedText);
+                handleSuccessfulScanUI(decodedText, codeType);
             }
 
             function onScanSuccess(decodedText) {
@@ -220,25 +450,69 @@
                 return 'BarcodeDetector' in window;
             }
 
-            async function discoverPreferredCamera() {
+            async function refreshHtml5CameraList() {
                 if (!canUseHtml5Qrcode() || typeof Html5Qrcode.getCameras !== 'function') {
-                    return null;
+                    html5CameraList = [];
+                    html5HasMultipleCameras = false;
+                    updateSwitchCameraButton();
+                    return;
                 }
 
                 try {
                     const cameras = await Html5Qrcode.getCameras();
-                    if (!cameras || cameras.length === 0) {
-                        return null;
+                    if (!Array.isArray(cameras) || cameras.length === 0) {
+                        html5CameraList = [];
+                        html5HasMultipleCameras = false;
+                        updateSwitchCameraButton();
+                        return;
                     }
 
-                    const rearCamera = cameras.find(camera =>
-                        /back|rear|environment/i.test(camera.label)
-                    );
+                    html5CameraList = cameras;
+                    html5HasMultipleCameras = cameras.length > 1;
 
-                    return (rearCamera || cameras[0]).id;
+                    let resolvedIndex = -1;
+
+                    if (preferredCameraId) {
+                        resolvedIndex = cameras.findIndex(camera => camera.id === preferredCameraId);
+                    }
+
+                    if (resolvedIndex === -1 && cameraIndex >= 0 && cameraIndex < cameras.length) {
+                        resolvedIndex = cameraIndex;
+                        preferredCameraId = cameras[resolvedIndex].id;
+                    }
+
+                    if (resolvedIndex === -1) {
+                        const rearIndex = cameras.findIndex(camera =>
+                            /back|rear|environment/i.test(camera.label)
+                        );
+                        resolvedIndex = rearIndex >= 0 ? rearIndex : 0;
+                        preferredCameraId = cameras[resolvedIndex].id;
+                    }
+
+                    cameraIndex = resolvedIndex;
+                    updateSwitchCameraButton();
                 } catch (err) {
-                    console.warn('Failed to enumerate cameras:', err);
-                    return null;
+                    console.warn('Failed to enumerate camera devices:', err);
+                }
+            }
+
+            function syncActiveHtml5CameraFromTrack() {
+                if (!html5QrcodeInstance || typeof html5QrcodeInstance.getRunningTrackSettings !== 'function') {
+                    return;
+                }
+
+                const settings = html5QrcodeInstance.getRunningTrackSettings();
+                if (!settings || !settings.deviceId) {
+                    return;
+                }
+
+                preferredCameraId = settings.deviceId;
+
+                if (html5CameraList.length > 0) {
+                    const runningIndex = html5CameraList.findIndex(camera => camera.id === preferredCameraId);
+                    if (runningIndex >= 0) {
+                        cameraIndex = runningIndex;
+                    }
                 }
             }
 
@@ -257,20 +531,23 @@
                 }
             }
 
-            async function startHtml5Qrcode() {
+            async function startHtml5Qrcode(cameraIdOverride) {
                 ensureReaderActive();
 
                 if (!html5QrcodeInstance) {
                     html5QrcodeInstance = new Html5Qrcode('reader');
                 }
 
-                if (!preferredCameraId) {
-                    preferredCameraId = await discoverPreferredCamera();
+                if (cameraIdOverride) {
+                    preferredCameraId = cameraIdOverride;
                 }
 
-                const cameraConfig = preferredCameraId
-                    ? { deviceId: { exact: preferredCameraId } }
-                    : { facingMode: 'environment' };
+                let cameraConfig;
+                if (preferredCameraId) {
+                    cameraConfig = { deviceId: { exact: preferredCameraId } };
+                } else {
+                    cameraConfig = { facingMode: 'environment' };
+                }
 
                 const config = {
                     fps: 15,
@@ -298,10 +575,25 @@
                 }
 
                 await html5QrcodeInstance.start(cameraConfig, config, onScanSuccess, onScanError);
+
+                // Only sync and refresh camera list AFTER successful start to avoid double permission requests
+                syncActiveHtml5CameraFromTrack();
+
+                // Refresh camera list in background without awaiting to avoid blocking
+                refreshHtml5CameraList().catch(err => {
+                    console.warn('Failed to refresh camera list:', err);
+                });
+
+                if (!preferredCameraId) {
+                    syncActiveHtml5CameraFromTrack();
+                }
+
                 activeScanner = 'html5-qrcode';
                 isScanning = true;
                 scanButton.textContent = 'Stop Scanning';
-                setStatus('Point camera at barcode or QR code');
+                const label = describeCameraFromState();
+                setStatus(label ? `Point camera at barcode or QR code (${label})` : 'Point camera at barcode or QR code');
+                updateSwitchCameraButton();
             }
 
             async function startBarcodeDetector() {
@@ -319,15 +611,24 @@
                 readerDiv.appendChild(video);
 
                 try {
+                    const desiredFacingMode = fallbackFacingModes[fallbackFacingIndex] || 'environment';
                     mediaStream = await navigator.mediaDevices.getUserMedia({
                         video: {
-                            facingMode: { ideal: 'environment' },
+                            facingMode: { ideal: desiredFacingMode },
                             width: { ideal: 1280 },
                             height: { ideal: 720 }
                         }
                     });
                 } catch (err) {
                     readerDiv.removeChild(video);
+                    // Provide more specific error messages for permission issues
+                    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                        throw new Error('Camera permission denied. Please allow camera access and try again.');
+                    } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+                        throw new Error('No camera found. Please connect a camera and try again.');
+                    } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+                        throw new Error('Camera is already in use by another application.');
+                    }
                     throw err;
                 }
 
@@ -373,7 +674,16 @@
                 activeScanner = 'barcode-detector';
                 isScanning = true;
                 scanButton.textContent = 'Stop Scanning';
-                setStatus('Point camera at barcode or QR code');
+                const cameraLabel = describeCameraFromState('barcode-detector');
+                setStatus(`Point camera at barcode or QR code (${cameraLabel})`);
+                try {
+                    const devices = await navigator.mediaDevices.enumerateDevices();
+                    const videoInputs = devices.filter(device => device.kind === 'videoinput');
+                    fallbackCameraCount = videoInputs.length;
+                } catch (err) {
+                    console.warn('Unable to enumerate video devices:', err);
+                }
+                updateSwitchCameraButton();
 
                 const detect = async () => {
                     if (!isScanning || activeScanner !== 'barcode-detector') {
@@ -386,6 +696,7 @@
                             const value = barcodes[0].rawValue;
                             if (recordResult(value)) {
                                 addResult(value);
+                                return; // Stop detection loop after successful scan
                             }
                         }
                     } catch (err) {
@@ -403,11 +714,28 @@
                     return;
                 }
 
+                // Clear the result textarea when starting a new scan
+                resultTextarea.value = '';
+
                 scanButton.disabled = true;
+                switchCameraButton.disabled = true;
                 teardownSuccessTimer();
                 setStatus('Starting camera...');
 
                 try {
+                    // Check camera permission before attempting to start
+                    if (navigator.permissions && navigator.permissions.query) {
+                        try {
+                            const permissionStatus = await navigator.permissions.query({ name: 'camera' });
+                            if (permissionStatus.state === 'denied') {
+                                throw new Error('Camera permission denied. Please enable camera access in your browser settings.');
+                            }
+                        } catch (permErr) {
+                            // Permission API not available or not supported, continue normally
+                            console.log('Permission API not available, proceeding with camera access');
+                        }
+                    }
+
                     if (canUseHtml5Qrcode()) {
                         try {
                             await startHtml5Qrcode();
@@ -426,9 +754,15 @@
                     throw new Error('No barcode scanning capability available on this device.');
                 } catch (err) {
                     resetReader();
-                    setStatus(`Error: ${err.message || err}`, 'error');
+                    const message = err.message || err;
+                    if (message.includes('permission') || message.includes('Permission') || message.includes('denied')) {
+                        setStatus(`Camera access denied. Please allow camera permissions and try again.`, 'error');
+                    } else {
+                        setStatus(`Error: ${message}`, 'error');
+                    }
                 } finally {
                     scanButton.disabled = false;
+                    updateSwitchCameraButton();
                 }
             }
 
@@ -495,6 +829,123 @@
                 barcodeDetector = null;
             }
 
+            async function switchHtml5QrcodeCamera() {
+                if (!isScanning || activeScanner !== 'html5-qrcode') {
+                    return;
+                }
+
+                if (html5CameraList.length <= 1) {
+                    await refreshHtml5CameraList();
+                    if (html5CameraList.length <= 1) {
+                        updateSwitchCameraButton();
+                        return;
+                    }
+                }
+
+                const previousIndex = cameraIndex;
+                const previousCameraId = preferredCameraId;
+
+                cameraIndex = (cameraIndex + 1) % html5CameraList.length;
+                preferredCameraId = html5CameraList[cameraIndex].id;
+
+                const targetLabel = describeCameraFromState('html5-qrcode') || 'selected camera';
+                scanButton.disabled = true;
+                switchCameraButton.disabled = true;
+                setStatus(`Switching to ${targetLabel}...`);
+
+                let encounteredError = false;
+                let restoredPrevious = false;
+
+                try {
+                    await stopHtml5Qrcode();
+                    isScanning = false;
+                    activeScanner = null;
+                    await startHtml5Qrcode(preferredCameraId);
+                } catch (err) {
+                    encounteredError = true;
+                    console.error('Camera switch failed:', err);
+                    cameraIndex = previousIndex;
+                    preferredCameraId = previousCameraId;
+
+                    try {
+                        await startHtml5Qrcode(preferredCameraId);
+                        restoredPrevious = true;
+                    } catch (restoreErr) {
+                        console.error('Failed to restore previous camera:', restoreErr);
+                    }
+
+                    const reason = err && err.message ? `: ${err.message}` : '';
+                    const recoveryNote = restoredPrevious ? ' Restored previous camera.' : '';
+                    setStatus(`Camera switch failed${reason}.${recoveryNote}`, 'error');
+                } finally {
+                    if (!isScanning) {
+                        scanButton.textContent = 'Scan';
+                    }
+                    scanButton.disabled = false;
+                    switchCameraButton.disabled = !isScanning;
+                    if (!encounteredError && isScanning && activeScanner === 'html5-qrcode') {
+                        const label = describeCameraFromState();
+                        setStatus(label ? `Point camera at barcode or QR code (${label})` : 'Point camera at barcode or QR code');
+                    }
+                    updateSwitchCameraButton();
+                }
+            }
+
+            async function switchBarcodeDetectorCamera() {
+                if (!isScanning || activeScanner !== 'barcode-detector') {
+                    return;
+                }
+
+                if (fallbackCameraCount <= 1) {
+                    return;
+                }
+
+                const previousFacingIndex = fallbackFacingIndex;
+                fallbackFacingIndex = (fallbackFacingIndex + 1) % fallbackFacingModes.length;
+
+                const targetLabel = describeCameraFromState('barcode-detector');
+                scanButton.disabled = true;
+                switchCameraButton.disabled = true;
+                setStatus(`Switching to ${targetLabel}...`);
+
+                stopBarcodeDetector();
+                isScanning = false;
+                activeScanner = null;
+
+                let encounteredError = false;
+                let restoredPrevious = false;
+
+                try {
+                    await startBarcodeDetector();
+                } catch (err) {
+                    encounteredError = true;
+                    console.error('Camera switch failed:', err);
+                    fallbackFacingIndex = previousFacingIndex;
+
+                    try {
+                        await startBarcodeDetector();
+                        restoredPrevious = true;
+                    } catch (restoreErr) {
+                        console.error('Failed to restore previous camera:', restoreErr);
+                    }
+
+                    const reason = err && err.message ? `: ${err.message}` : '';
+                    const recoveryNote = restoredPrevious ? ' Restored previous camera.' : '';
+                    setStatus(`Camera switch failed${reason}.${recoveryNote}`, 'error');
+                } finally {
+                    if (!isScanning) {
+                        scanButton.textContent = 'Scan';
+                    }
+                    scanButton.disabled = false;
+                    switchCameraButton.disabled = !isScanning;
+                    if (!encounteredError && isScanning && activeScanner === 'barcode-detector') {
+                        const label = describeCameraFromState();
+                        setStatus(`Point camera at barcode or QR code (${label})`);
+                    }
+                    updateSwitchCameraButton();
+                }
+            }
+
             async function stopScanning() {
                 if (!isScanning) {
                     return;
@@ -517,10 +968,12 @@
                     activeScanner = null;
                     scanButton.textContent = 'Scan';
                     scanButton.disabled = false;
+                    switchCameraButton.disabled = true;
                     resetReader();
-                    if (statusDiv.textContent === 'Point camera at barcode or QR code') {
+                    if (statusDiv.textContent.startsWith('Point camera at barcode or QR code')) {
                         setStatus('');
                     }
+                    updateSwitchCameraButton();
                 }
             }
 
@@ -536,13 +989,44 @@
                 }
             });
 
-            document.addEventListener('visibilitychange', () => {
-                if (document.hidden && isScanning) {
-                    stopScanning().catch(err => {
-                        console.warn('Failed to stop scanner on visibility change:', err);
-                    });
+            switchCameraButton.addEventListener('click', async () => {
+                if (switchCameraButton.disabled || !isScanning) {
+                    return;
+                }
+
+                try {
+                    if (activeScanner === 'html5-qrcode') {
+                        await switchHtml5QrcodeCamera();
+                    } else if (activeScanner === 'barcode-detector') {
+                        await switchBarcodeDetectorCamera();
+                    }
+                } catch (err) {
+                    console.error('Unexpected camera switch error:', err);
+                    setStatus(`Camera switch failed: ${err.message || err}`, 'error');
                 }
             });
+
+            clearHistoryButton.addEventListener('click', () => {
+                clearHistory();
+            });
+
+            document.addEventListener('visibilitychange', () => {
+                // Only stop scanner if page is hidden and we're actually scanning
+                // This prevents interference with permission dialogs
+                if (document.hidden && isScanning) {
+                    // Add a small delay to avoid stopping during permission dialogs
+                    setTimeout(() => {
+                        if (document.hidden && isScanning) {
+                            stopScanning().catch(err => {
+                                console.warn('Failed to stop scanner on visibility change:', err);
+                            });
+                        }
+                    }, 1000);
+                }
+            });
+
+            // Initialize history on page load
+            loadHistoryFromLocalStorage();
         })();
     </script>
 </body>
