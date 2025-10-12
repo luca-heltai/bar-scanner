@@ -11,6 +11,9 @@ let
     afterPreviousCallFinished,
     requestId = null;
 
+// track last decoded symbols for display
+let lastSymbols = [];
+
 el.usingOffscreenCanvas.innerText = usingOffscreenCanvas ? 'yes' : 'no'
 
 
@@ -21,6 +24,44 @@ function isOffscreenCanvasWorking() {
     } catch {
         return false
     }
+}
+
+
+function tryShowSuccessBanner(symbols) {
+    const banner = el.successBanner
+    const textEl = el.successText
+
+    if (!banner || !textEl) return
+
+    const primary = symbols[0]
+    const display = primary && (primary.rawValue || primary.data || primary.type) ? (primary.rawValue || primary.data || primary.type) : JSON.stringify(primary)
+
+    textEl.innerText = `Decoded: ${display}`
+    banner.style.display = 'block'
+}
+
+
+// Resume scanning: start camera again and hide banner
+function resumeCamera() {
+    const banner = el.successBanner
+    if (banner) banner.style.display = 'none'
+
+    // try to re-open camera
+    navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment' } })
+        .then(stream => {
+            el.video.srcObject = stream
+            el.videoBtn.className = 'button-primary'
+            detectVideo(true)
+        })
+        .catch(err => {
+            // show error in result if it fails
+            el.result.innerText = JSON.stringify(err)
+        })
+}
+
+// wire resume button if present
+if (el.resumeBtn) {
+    el.resumeBtn.addEventListener('click', resumeCamera)
 }
 
 
@@ -95,6 +136,31 @@ function detect(source) {
                 el.getImageDataTime.innerText = formatNumber(afterGetImageData - afterDrawImage)
                 el.scanImageDataTime.innerText = formatNumber(afterScanImageData - afterGetImageData)
                 el.timing.className = 'visible'
+                // If we decoded at least one symbol, stop further scanning (stop camera + animation loop)
+                if (symbols && symbols.length > 0) {
+                    lastSymbols = symbols
+
+                    // show success banner with the first decoded value
+                    tryShowSuccessBanner(symbols)
+                    // stop video stream if active
+                    if (el.video && el.video.srcObject) {
+                        try {
+                            el.video.srcObject.getTracks().forEach(track => track.stop())
+                        } catch (e) {
+                            // ignore
+                        }
+                        el.video.srcObject = null
+                    }
+
+                    // cancel any pending animation frame
+                    if (requestId) {
+                        cancelAnimationFrame(requestId)
+                        requestId = null
+                    }
+
+                    // update video button state
+                    if (el.videoBtn) el.videoBtn.className = ''
+                }
 
                 afterPreviousCallFinished = performance.now()
             })
@@ -124,7 +190,14 @@ function detectImg() {
 function detectVideo(active) {
     if (active) {
         detect(el.video)
-            .then(() => requestId = requestAnimationFrame(() => detectVideo(true)))
+            .then(() => {
+                // Only schedule the next frame if the video stream is still active.
+                if (el.video && el.video.srcObject) {
+                    requestId = requestAnimationFrame(() => detectVideo(true))
+                } else {
+                    requestId = null
+                }
+            })
 
     } else {
         cancelAnimationFrame(requestId)

@@ -2,7 +2,8 @@
     margin-top: 1em;
 }
 
-h5, p {
+h5,
+p {
     margin-top: 0.5em;
 }
 
@@ -15,7 +16,10 @@ label {
     position: relative;
 }
 
-img, video, #note, #timing {
+img,
+video,
+#note,
+#timing {
     display: none;
     max-width: 100%;
 }
@@ -30,10 +34,10 @@ img, video, #note, #timing {
     background-color: #33C3F0;
 }
 
-#imgUrl.active ~ .viewport > #img,
-#imgUrl.active ~ #note,
-#imgBtn.button-primary ~ .viewport > #img,
-#videoBtn.button-primary ~ .viewport > #video,
+#imgUrl.active~.viewport>#img,
+#imgUrl.active~#note,
+#imgBtn.button-primary~.viewport>#img,
+#videoBtn.button-primary~.viewport>#video,
 #timing.visible {
     display: block;
 }
@@ -55,4 +59,43 @@ pre {
     white-space: pre-wrap;
     word-wrap: break-word;
     margin-top: 0;
+}
+
+/* Success banner */
+.success-banner {
+    position: fixed;
+    left: 50%;
+    top: 1rem;
+    transform: translateX(-50%);
+    background: rgba(0, 200, 0, 0.95);
+    color: white;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+    z-index: 2000;
+    min-width: 280px;
+}
+
+.success-content {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.success-text {
+    font-weight: 600;
+    margin-right: 1rem;
+}
+
+.success-actions .button {
+    background: rgba(255, 255, 255, 0.15);
+    color: white;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    padding: 0.35rem 0.6rem;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.success-actions .button:hover {
+    background: rgba(255, 255, 255, 0.25);
 }
