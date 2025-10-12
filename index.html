@@ -246,10 +246,24 @@
     <div class="container">
         <h1>📱 Bar Scanner</h1>
         <div id="reader"></div>
+        <!-- Backend selector: choose which decoding backend to prefer -->
+        <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center;">
+            <label for="backendSelector" style="font-size:14px; color:#444; min-width:120px;">Backend:</label>
+            <select id="backendSelector"
+                style="flex:1; padding:10px; border-radius:8px; border:1px solid #e0e0e0; font-size:14px;">
+                <option value="auto">Auto (recommended)</option>
+                <option value="zbar">ZBar (1D barcodes)</option>
+                <option value="barcode-detector">BarcodeDetector (native)</option>
+                <option value="html5-qrcode">html5-qrcode (JS)</option>
+            </select>
+        </div>
         <button id="scanButton">Scan</button>
         <button id="switchCameraButton">Switch Camera</button>
         <textarea id="result" readonly placeholder="Scanned codes will appear here..."></textarea>
         <div id="status" class="status"></div>
+        <!-- Active backend indicator -->
+        <div id="backendStatus" style="text-align:center; margin-top:6px; font-size:13px; color:#444;">Backend: Idle
+        </div>
 
         <div class="history-section">
             <div class="history-header">
@@ -392,7 +406,7 @@
             let fallbackCameraCount = 0;
 
             // EAN-first strategy: attempt EAN-13 only initially, then fallback
-            const EAN_ONLY_FALLBACK_MS = 5000;
+            // EAN-only automatic fallback has been disabled per user preference
             let eanFallbackTimer = null;
             let eanModeActive = false;
 
@@ -400,6 +414,78 @@
             let cameraPermissionState = null;
             let lastPermissionCheck = 0;
             const PERMISSION_CACHE_TTL = 30000; // 30 seconds
+
+            // zbar-wasm integration (configurable CDN URL)
+            // If you have a known zbar-wasm script URL, set it here. Leave empty to require
+            // the script to be included manually or the global API to be available.
+            const ZBAR_WASM_URL = 'https://cdn.jsdelivr.net/npm/zbar-wasm@latest/dist/zbar-wasm.js';
+            let _zbarReady = false;
+            let _zbarInitPromise = null;
+            let _zbarLoopIntervalId = null;
+
+            // Backend selector state (auto|zbar|barcode-detector|html5-qrcode)
+            const backendSelector = document.getElementById('backendSelector');
+            let forcedBackend = localStorage.getItem('barScannerBackend') || 'auto';
+            if (backendSelector) {
+                backendSelector.value = forcedBackend;
+                backendSelector.addEventListener('change', async () => {
+                    const prev = forcedBackend;
+                    forcedBackend = backendSelector.value || 'auto';
+                    localStorage.setItem('barScannerBackend', forcedBackend);
+                    appendLog(`Backend selector changed to: ${forcedBackend}`);
+
+                    // If scanning is active, restart scanning with the new backend so
+                    // the active backend indicator and history reflect the user's choice.
+                    if (isScanning && !isPaused) {
+                        appendLog('Backend changed while scanning — restarting scanner to apply new backend');
+                        try {
+                            await stopScanning();
+                        } catch (e) {
+                            appendLog(`Error stopping previous scanner: ${e && e.message ? e.message : e}`, 'warn');
+                        }
+
+                        try {
+                            await startScanning();
+                        } catch (e) {
+                            appendLog(`Failed to start scanner with new backend '${forcedBackend}': ${e && e.message ? e.message : e}`, 'error');
+                            // Set indicator to reflect the forced backend selection even if start failed
+                            try { setActiveBackend(forcedBackend); } catch (ee) { }
+                        }
+                    } else {
+                        // Update displayed active backend if idle
+                        try { setActiveBackend('Idle'); } catch (e) { }
+                    }
+                });
+            }
+
+            // Active backend indicator helper
+            const backendStatusEl = document.getElementById('backendStatus');
+
+            // Normalize backend identifiers to a human-friendly label so history
+            // and the active backend indicator show consistent names regardless
+            // of internal/legacy naming (e.g. 'zbar' vs 'ZBar' vs 'barcode-detector').
+            function normalizeBackendName(raw) {
+                if (!raw) return 'unknown';
+                const s = String(raw).trim();
+                const low = s.toLowerCase();
+                if (low === 'zbar' || low === 'zbar-wasm' || low === 'zbar_wasm' || low === 'zbar-wasm.js' || low === 'zbar-wasm@latest') return 'ZBar';
+                if (low.indexOf('barcode') >= 0 || low.indexOf('barcode-detector') >= 0 || low === 'barcodedetector' || low === 'barcodedetector') return 'BarcodeDetector';
+                if (low.indexOf('html5') >= 0 || low.indexOf('html5-qrcode') >= 0 || low.indexOf('html5qrcode') >= 0) return 'html5-qrcode';
+                // Recognize some common casing variations
+                if (low === 'zbar' || low === 'zbar.js') return 'ZBar';
+                if (low === 'auto') return 'Auto';
+                return s; // fallback to original string
+            }
+
+            function setActiveBackend(name) {
+                try {
+                    if (!backendStatusEl) return;
+                    const label = name ? normalizeBackendName(name) : 'Idle';
+                    backendStatusEl.textContent = `Backend: ${label}`;
+                } catch (e) {
+                    // ignore
+                }
+            }
 
             function pauseScanning() {
                 appendLog('pauseScanning() called');
@@ -535,12 +621,16 @@
             let scanHistory = [];
             const MAX_HISTORY_ITEMS = 50;
 
-            function addToHistory(decodedText, codeType, timestamp) {
+            function addToHistory(decodedText, codeType, timestamp, backend) {
                 appendLog(`addToHistory() called - ${decodedText}`);
+                const usedBackendRaw = backend || (activeScanner || forcedBackend || 'unknown');
+                const usedBackend = normalizeBackendName(usedBackendRaw);
+
                 const historyItem = {
                     text: decodedText,
                     type: codeType,
                     timestamp: timestamp,
+                    backend: usedBackend,
                     id: Date.now() + Math.random() // Simple unique ID
                 };
 
@@ -570,12 +660,14 @@
                     const shortText = item.text.length > 60 ? item.text.substring(0, 60) + '...' : item.text;
                     historyHTML += `
                         <div style="margin-bottom: 15px; padding: 10px; background: white; border-radius: 8px; border-left: 4px solid #667eea;">
-                            <div style="font-weight: bold; color: #333; margin-bottom: 5px;">
-                                ${item.type} - ${item.timestamp}
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 5px;">
+                                <div style="font-weight: bold; color: #333;">${item.type}</div>
+                                <div style="font-size:12px; color:#666">${item.timestamp}</div>
                             </div>
-                            <div style="font-family: 'Courier New', monospace; word-break: break-all; color: #555;">
+                            <div style="font-family: 'Courier New', monospace; word-break: break-all; color: #555; margin-bottom:6px;">
                                 ${shortText}
                             </div>
+                            <div style="font-size:12px; color:#888; text-align:right;">Backend: ${item.backend}</div>
                         </div>
                     `;
                 });
@@ -726,7 +818,7 @@
                 return 'QR Code';
             }
 
-            function displayCodeInfo(decodedText, codeType) {
+            function displayCodeInfo(decodedText, codeType, backend) {
                 appendLog(`displayCodeInfo() called - ${decodedText}`);
                 const timestamp = new Date().toLocaleString();
                 const codeInfo = `
@@ -741,27 +833,30 @@
                 resultTextarea.value = codeInfo + resultTextarea.value;
                 resultTextarea.scrollTop = 0;
 
-                // Add to history
-                addToHistory(decodedText, codeType, timestamp);
+                // Add to history (include the backend used)
+                const usedBackend = backend || activeScanner || forcedBackend || 'unknown';
+                addToHistory(decodedText, codeType, timestamp, usedBackend);
             }
 
-            function handleSuccessfulScanUI(decodedText, codeType) {
+            function handleSuccessfulScanUI(decodedText, codeType, backend) {
                 appendLog(`handleSuccessfulScanUI() called - ${decodedText}`);
                 if (successMessageTimeoutId) {
                     clearTimeout(successMessageTimeoutId);
                 }
 
                 setStatus(`✓ ${codeType} captured! Click scan to continue.`, 'success');
-                displayCodeInfo(decodedText, codeType);
+                displayCodeInfo(decodedText, codeType, backend);
 
                 // Pause scanning instead of stopping completely to avoid permission re-request
                 pauseScanning();
             }
 
-            function addResult(decodedText) {
+            function addResult(decodedText, backend) {
                 appendLog(`addResult() called - ${decodedText}`);
                 const codeType = detectCodeType(decodedText);
-                handleSuccessfulScanUI(decodedText, codeType);
+                // Normalize backend label before passing into UI/history to avoid races
+                const normalized = normalizeBackendName(backend || activeScanner || forcedBackend || 'unknown');
+                handleSuccessfulScanUI(decodedText, codeType, normalized);
             }
 
             function onScanSuccess(decodedText) {
@@ -773,7 +868,8 @@
                 eanModeActive = false;
 
                 if (recordResult(decodedText)) {
-                    addResult(decodedText);
+                    const used = activeScanner || forcedBackend || 'unknown';
+                    addResult(decodedText, used);
                 }
             }
 
@@ -1062,6 +1158,196 @@
                 }
             }
 
+            // Try to initialize zbar-wasm by loading the script (if URL set) and resolving when
+            // a known global API is available. This is intentionally permissive to support
+            // different builds that expose different global names.
+            function initZbar(url) {
+                if (_zbarInitPromise) return _zbarInitPromise;
+
+                _zbarInitPromise = new Promise((resolve, reject) => {
+                    // If a usable API is already present, resolve immediately
+                    if (typeof window.zbarDecode === 'function' || typeof window.zbar === 'object' || typeof window.ZBar === 'object' || typeof window.decodeZbar === 'function') {
+                        _zbarReady = true;
+                        appendLog('initZbar: found existing zbar global API', 'info');
+                        return resolve(true);
+                    }
+
+                    if (!url) {
+                        appendLog('initZbar: no ZBAR_WASM_URL provided; caller must include zbar-wasm bundle manually', 'warn');
+                        return reject(new Error('No zbar URL provided'));
+                    }
+
+                    appendLog(`initZbar: attempting to load zbar from ${url}`, 'info');
+                    const s = document.createElement('script');
+                    s.src = url;
+                    s.async = true;
+                    s.onload = () => {
+                        // Give the script a moment to initialize globals
+                        setTimeout(() => {
+                            if (typeof window.zbarDecode === 'function' || typeof window.zbar === 'object' || typeof window.ZBar === 'object' || typeof window.decodeZbar === 'function') {
+                                _zbarReady = true;
+                                appendLog('initZbar: zbar loaded and API detected', 'info');
+                                resolve(true);
+                            } else {
+                                appendLog('initZbar: zbar script loaded but no known API detected; please verify bundle exposes a global decoder function (e.g. zbarDecode)', 'warn');
+                                // still resolve; startZbar will check and fail gracefully
+                                resolve(false);
+                            }
+                        }, 200);
+                    };
+                    s.onerror = (e) => {
+                        appendLog(`initZbar: failed to load zbar script: ${e && e.message ? e.message : e}`, 'error');
+                        reject(new Error('Failed to load zbar script'));
+                    };
+                    document.head.appendChild(s);
+                });
+
+                return _zbarInitPromise;
+            }
+
+            function canUseZbar() {
+                // True if a known zbar decode function is present or a URL is configured
+                if (typeof window.zbarDecode === 'function' || typeof window.decodeZbar === 'function' || (window.zbar && typeof window.zbar.decode === 'function')) return true;
+                return Boolean(ZBAR_WASM_URL);
+            }
+
+            // decodeImageDataWithZbar tries several possible global APIs that zbar-wasm builds may expose.
+            // It returns an array of decoded objects or null.
+            async function decodeImageDataWithZbar(imageData, width, height) {
+                // Preferred simple global
+                if (typeof window.zbarDecode === 'function') {
+                    try { return await window.zbarDecode(imageData, width, height); } catch (e) { throw e; }
+                }
+                if (typeof window.decodeZbar === 'function') {
+                    try { return await window.decodeZbar(imageData, width, height); } catch (e) { throw e; }
+                }
+                if (window.zbar && typeof window.zbar.decode === 'function') {
+                    try { return await window.zbar.decode(imageData, width, height); } catch (e) { throw e; }
+                }
+                if (window.ZBar && typeof window.ZBar.decode === 'function') {
+                    try { return await window.ZBar.decode(imageData, width, height); } catch (e) { throw e; }
+                }
+                // No known API
+                throw new Error('No zbar decode API found');
+            }
+
+            async function startZbar(formatsToSupport) {
+                appendLog('startZbar() called');
+                ensureReaderActive();
+
+                // Ensure module is initialized
+                try {
+                    await initZbar(ZBAR_WASM_URL);
+                } catch (e) {
+                    appendLog('startZbar: zbar init failed: ' + (e && e.message ? e.message : e), 'warn');
+                    throw e;
+                }
+
+                // If there's already a media stream (from barcode detector), try to reuse it
+                let video = barcodeVideoElement;
+                let createdVideo = false;
+                if (!video) {
+                    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                        throw new Error('Camera access is not supported in this browser.');
+                    }
+                    video = document.createElement('video');
+                    video.style.width = '100%';
+                    video.style.borderRadius = '10px';
+                    video.autoplay = true;
+                    video.playsInline = true;
+                    readerDiv.appendChild(video);
+                    createdVideo = true;
+
+                    try {
+                        const constraints = { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } };
+                        mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+                        video.srcObject = mediaStream;
+                        barcodeVideoElement = video;
+                    } catch (err) {
+                        if (createdVideo && video.parentElement === readerDiv) readerDiv.removeChild(video);
+                        throw err;
+                    }
+                }
+
+                // Wait for video ready
+                await new Promise((resolve, reject) => {
+                    if (video.readyState >= 2) return resolve();
+                    video.onloadedmetadata = () => resolve();
+                    video.onerror = () => reject(new Error('Failed to load video stream'));
+                    setTimeout(() => reject(new Error('Video loading timeout')), 10000);
+                });
+
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+
+                activeScanner = 'zbar';
+                isScanning = true;
+                scanButton.textContent = 'Stop Scanning';
+                setStatus('Point camera at barcode or QR code (ZBar)');
+                try { setActiveBackend('ZBar'); } catch (e) { }
+
+                const tick = async () => {
+                    if (!isScanning || activeScanner !== 'zbar') return;
+                    try {
+                        const w = video.videoWidth || 640;
+                        const h = video.videoHeight || 480;
+                        canvas.width = w;
+                        canvas.height = h;
+                        ctx.drawImage(video, 0, 0, w, h);
+                        const imageData = ctx.getImageData(0, 0, w, h);
+                        // call zbar decoder
+                        const results = await decodeImageDataWithZbar(imageData.data, w, h);
+                        // Results format may vary across builds; try to normalize
+                        if (results && results.length > 0) {
+                            const first = results[0];
+                            // Try multiple property names
+                            const value = first.data || first.value || first.rawValue || first.code || String(first);
+                            if (value && recordResult(value)) {
+                                addResult(String(value), 'ZBar');
+                                return;
+                            }
+                        }
+                    } catch (err) {
+                        // If zbar API not present, abort
+                        if (/No zbar decode API/.test(err.message || '')) {
+                            appendLog('startZbar: zbar decode API not found, aborting zbar loop', 'warn');
+                            stopZbar();
+                            return;
+                        }
+                        // Otherwise ignore transient errors
+                    }
+                };
+
+                // Run at modest rate for performance (6 fps)
+                _zbarLoopIntervalId = setInterval(tick, 166);
+                // run an immediate tick
+                tick();
+            }
+
+            function stopZbar() {
+                appendLog('stopZbar() called');
+                if (_zbarLoopIntervalId) {
+                    clearInterval(_zbarLoopIntervalId);
+                    _zbarLoopIntervalId = null;
+                }
+                if (mediaStream) {
+                    mediaStream.getTracks().forEach(t => t.stop());
+                    mediaStream = null;
+                }
+                const video = barcodeVideoElement;
+                barcodeVideoElement = null;
+                if (video) {
+                    if (video.srcObject) {
+                        video.pause();
+                        video.srcObject = null;
+                    }
+                    if (video.parentElement === readerDiv) readerDiv.removeChild(video);
+                }
+                if (activeScanner === 'zbar') activeScanner = null;
+                isScanning = false;
+                try { setActiveBackend('Idle'); } catch (e) { }
+            }
+
             async function startHtml5Qrcode(cameraIdOverride, formatsToSupport) {
                 appendLog(`startHtml5Qrcode() called - override: ${cameraIdOverride} formats:${formatsToSupport ? formatsToSupport.join(',') : 'default'}`);
                 ensureReaderActive();
@@ -1146,6 +1432,7 @@
                     activeScanner = 'html5-qrcode';
                     isScanning = true;
                     scanButton.textContent = 'Stop Scanning';
+                    try { setActiveBackend('html5-qrcode'); } catch (e) { }
                 } catch (err) {
                     appendLog(`startHtml5Qrcode: failed to start - ${err && err.message ? err.message : err}`, 'error');
                     throw err;
@@ -1267,6 +1554,7 @@
                 isScanning = true;
                 scanButton.textContent = 'Stop Scanning';
                 setStatus('Point camera at barcode or QR code (Back camera)');
+                try { setActiveBackend('BarcodeDetector'); } catch (e) { }
 
                 // Simple camera count detection - only if we already have permission
                 try {
@@ -1293,7 +1581,7 @@
                         if (barcodes.length > 0) {
                             const value = barcodes[0].rawValue;
                             if (recordResult(value)) {
-                                addResult(value);
+                                addResult(value, 'BarcodeDetector');
                                 return; // Stop detection loop after successful scan
                             }
                         }
@@ -1332,30 +1620,113 @@
                     // If permission is 'granted' or 'prompt', proceed with camera access
                     // The actual permission dialog (if needed) will be triggered by the camera access itself
 
-                    // Prefer BarcodeDetector when available (better mobile performance on some devices)
+                    // If the user forced a backend, respect it; otherwise use Auto behavior.
+                    const backend = forcedBackend || 'auto';
+                    const userForced = backend !== 'auto';
+                    appendLog(`startScanning: backend preference = ${backend}`);
+
+                    if (backend === 'zbar') {
+                        // Force zbar as primary for EAN and broader decoding
+                        try {
+                            eanModeActive = true;
+                            await startZbar(['EAN_13']);
+
+                            // EAN-only fallback disabled: do not auto-switch backends. User will choose a different backend.
+                            appendLog('EAN-only fallback disabled; not auto-switching backends', 'info');
+
+                            return;
+                        } catch (err) {
+                            console.warn('ZBar forced selection failed:', err);
+                            try { stopZbar(); } catch (e) { }
+                            eanModeActive = false;
+                            if (userForced) {
+                                appendLog('Forced backend ZBar failed and user requested ZBar — not falling back to other backends', 'error');
+                                // Rethrow to outer handler which will show an error instead of silently falling back
+                                throw err;
+                            }
+                        }
+                    }
+
+                    if (backend === 'barcode-detector') {
+                        // Force native BarcodeDetector
+                        if (canUseBarcodeDetector()) {
+                            eanModeActive = true;
+                            await startBarcodeDetector(['EAN_13']);
+                            // EAN-only fallback disabled: do not auto-switch backends
+                            appendLog('EAN-only fallback disabled; not auto-switching backends', 'info');
+                            return;
+                        } else {
+                            if (userForced) {
+                                appendLog('Forced BarcodeDetector selected but not available and user requested it — aborting start', 'error');
+                                throw new Error('Forced backend BarcodeDetector not available');
+                            }
+                            appendLog('Forced BarcodeDetector selected but not available, falling back to auto', 'warn');
+                        }
+                    }
+
+                    if (backend === 'html5-qrcode') {
+                        // Force html5-qrcode (still try EAN-first then broader)
+                        if (canUseHtml5Qrcode()) {
+                            eanModeActive = true;
+                            await startHtml5Qrcode(null, ['EAN_13']);
+                            // EAN-only fallback disabled: do not auto-switch backends
+                            appendLog('EAN-only fallback disabled; not auto-switching backends', 'info');
+                            return;
+                        } else {
+                            if (userForced) {
+                                appendLog('Forced html5-qrcode selected but not available and user requested it — aborting start', 'error');
+                                throw new Error('Forced backend html5-qrcode not available');
+                            }
+                            appendLog('Forced html5-qrcode selected but not available, falling back to auto', 'warn');
+                        }
+                    }
+
+                    // Default 'auto' behavior: try zbar first, then BarcodeDetector, then html5-qrcode
+                    if (canUseZbar()) {
+                        try {
+                            eanModeActive = true;
+                            await startZbar(['EAN_13']);
+
+                            // EAN-only fallback disabled: do not auto-switch backends
+                            appendLog('EAN-only fallback disabled; not auto-switching backends', 'info');
+
+                            return;
+                        } catch (err) {
+                            console.warn('ZBar failed to start, attempting next fallbacks:', err);
+                            try { stopZbar(); } catch (e) { }
+                            eanModeActive = false;
+                        }
+                    }
+
+                    // Then prefer BarcodeDetector when available (better mobile performance on some devices)
                     if (canUseBarcodeDetector()) {
                         try {
                             // EAN-first with BarcodeDetector
                             eanModeActive = true;
                             await startBarcodeDetector(['EAN_13']);
 
-                            clearTimeout(eanFallbackTimer);
-                            eanFallbackTimer = setTimeout(async () => {
-                                try {
-                                    appendLog('EAN-only timeout reached; restarting with broader formats (BarcodeDetector -> html5-qrcode)');
-                                    flushEanSuppressed();
-                                    // Stop barcode detector cleanly
-                                    stopBarcodeDetector();
-                                    eanModeActive = false;
-                                    // Then try html5-qrcode as a broader fallback
-                                    if (canUseHtml5Qrcode()) {
-                                        await startHtml5Qrcode();
-                                    }
-                                } catch (e) {
-                                    console.warn('Failed to fallback to broader formats:', e);
-                                }
-                            }, EAN_ONLY_FALLBACK_MS);
+                            // EAN-only fallback disabled; not auto-switching backends
+                            appendLog('EAN-only fallback disabled; not auto-switching backends', 'info');
 
+                            return;
+                        } catch (err) {
+                            console.warn('BarcodeDetector failed to start, attempting html5-qrcode fallback:', err);
+                            try { stopBarcodeDetector(); } catch (e) { }
+                            eanModeActive = false;
+                        }
+                    } else {
+                        console.log('BarcodeDetector not available, trying html5-qrcode');
+                    }
+
+                    // Then prefer BarcodeDetector when available (better mobile performance on some devices)
+                    if (canUseBarcodeDetector()) {
+                        try {
+                            // EAN-first with BarcodeDetector
+                            eanModeActive = true;
+                            await startBarcodeDetector(['EAN_13']);
+
+                            // EAN-only fallback disabled; not auto-switching backends
+                            appendLog('EAN-only fallback disabled; not auto-switching backends', 'info');
                             return;
                         } catch (err) {
                             console.warn('BarcodeDetector failed to start, attempting html5-qrcode fallback:', err);
@@ -1372,20 +1743,8 @@
                             eanModeActive = true;
                             await startHtml5Qrcode(null, ['EAN_13']);
 
-                            // Setup fallback: if no successful scan in EAN_ONLY_FALLBACK_MS, restart with full formats
-                            clearTimeout(eanFallbackTimer);
-                            eanFallbackTimer = setTimeout(async () => {
-                                try {
-                                    appendLog('EAN-only timeout reached; restarting with broader formats');
-                                    // Before switching modes, flush suppressed EAN-only errors so the log reflects what happened
-                                    flushEanSuppressed();
-                                    await stopHtml5QrcodeSilently();
-                                    eanModeActive = false;
-                                    await startHtml5Qrcode();
-                                } catch (e) {
-                                    console.warn('Failed to fallback to broader formats:', e);
-                                }
-                            }, EAN_ONLY_FALLBACK_MS);
+                            // EAN-only fallback disabled; not auto-switching backends
+                            appendLog('EAN-only fallback disabled; not auto-switching backends', 'info');
 
                             return;
                         } catch (err) {
@@ -1450,6 +1809,7 @@
                 }
                 // Ensure we clear the instance reference to avoid dangling state
                 try { html5QrcodeInstance = null; } catch (e) { /* ignore */ }
+                try { setActiveBackend('Idle'); } catch (e) { }
             }
 
             async function stopHtml5QrcodeSilently() {
@@ -1486,6 +1846,7 @@
                 }
 
                 barcodeDetector = null;
+                try { setActiveBackend('Idle'); } catch (e) { }
             }
 
             async function switchHtml5QrcodeCamera() {
