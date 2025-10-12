@@ -953,12 +953,6 @@
                     ];
                 }
 
-                await html5QrcodeInstance.start(cameraConfig, config, onScanSuccess, onScanError);
-
-                activeScanner = 'html5-qrcode';
-                isScanning = true;
-                scanButton.textContent = 'Stop Scanning';
-
                 try {
                     await html5QrcodeInstance.start(cameraConfig, config, onScanSuccess, onScanError);
                     appendLog('startHtml5Qrcode: html5QrcodeInstance started successfully');
