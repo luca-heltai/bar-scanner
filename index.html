@@ -624,25 +624,32 @@
                 isScanning = true;
                 scanButton.textContent = 'Stop Scanning';
 
-                // Simplified camera detection for switch button
+                // Get camera info from the running instance without triggering new permission requests
                 try {
-                    const cameras = await Html5Qrcode.getCameras();
-                    html5CameraList = cameras || [];
-                    html5HasMultipleCameras = html5CameraList.length > 1;
-
-                    // Find current camera info
                     const settings = html5QrcodeInstance.getRunningTrackSettings();
                     if (settings && settings.deviceId) {
                         preferredCameraId = settings.deviceId;
-                        const currentIndex = html5CameraList.findIndex(cam => cam.id === settings.deviceId);
-                        if (currentIndex >= 0) {
-                            cameraIndex = currentIndex;
+                    }
+
+                    // Only enumerate cameras if we don't already have a list and we have permission
+                    if (html5CameraList.length === 0 && cameraPermissionState === 'granted') {
+                        try {
+                            const cameras = await Html5Qrcode.getCameras();
+                            html5CameraList = cameras || [];
+                            html5HasMultipleCameras = html5CameraList.length > 1;
+
+                            if (preferredCameraId) {
+                                const currentIndex = html5CameraList.findIndex(cam => cam.id === preferredCameraId);
+                                if (currentIndex >= 0) {
+                                    cameraIndex = currentIndex;
+                                }
+                            }
+                        } catch (enumErr) {
+                            console.warn('Camera enumeration failed, but scanner is working:', enumErr);
                         }
                     }
                 } catch (err) {
-                    console.warn('Camera enumeration failed:', err);
-                    html5CameraList = [];
-                    html5HasMultipleCameras = false;
+                    console.warn('Failed to get camera info:', err);
                 }
 
                 const label = describeCameraFromState();
@@ -727,11 +734,15 @@
                 scanButton.textContent = 'Stop Scanning';
                 setStatus('Point camera at barcode or QR code (Back camera)');
 
-                // Simple camera count detection
+                // Simple camera count detection - only if we already have permission
                 try {
-                    const devices = await navigator.mediaDevices.enumerateDevices();
-                    const videoInputs = devices.filter(device => device.kind === 'videoinput');
-                    fallbackCameraCount = videoInputs.length;
+                    if (cameraPermissionState === 'granted') {
+                        const devices = await navigator.mediaDevices.enumerateDevices();
+                        const videoInputs = devices.filter(device => device.kind === 'videoinput');
+                        fallbackCameraCount = videoInputs.length;
+                    } else {
+                        fallbackCameraCount = 2; // Assume at least 2 cameras for switch button
+                    }
                 } catch (err) {
                     fallbackCameraCount = 1;
                 }
