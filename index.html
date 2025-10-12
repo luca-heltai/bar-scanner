@@ -197,6 +197,47 @@
             let fallbackFacingIndex = 0;
             let fallbackCameraCount = 0;
 
+            // Permission caching to avoid repeated permission checks
+            let cameraPermissionState = null;
+            let lastPermissionCheck = 0;
+            const PERMISSION_CACHE_TTL = 30000; // 30 seconds
+
+            async function checkCameraPermission() {
+                const now = Date.now();
+
+                // Use cached permission state if it's recent
+                if (cameraPermissionState && (now - lastPermissionCheck) < PERMISSION_CACHE_TTL) {
+                    return cameraPermissionState;
+                }
+
+                // Only check permissions if the API is available
+                if (!navigator.permissions || !navigator.permissions.query) {
+                    // If permission API is not available, assume we need to try camera access
+                    cameraPermissionState = 'prompt';
+                    lastPermissionCheck = now;
+                    return cameraPermissionState;
+                }
+
+                try {
+                    const permissionStatus = await navigator.permissions.query({ name: 'camera' });
+                    cameraPermissionState = permissionStatus.state;
+                    lastPermissionCheck = now;
+
+                    // Listen for permission changes to update our cache
+                    permissionStatus.onchange = () => {
+                        cameraPermissionState = permissionStatus.state;
+                        lastPermissionCheck = Date.now();
+                    };
+
+                    return cameraPermissionState;
+                } catch (err) {
+                    console.log('Permission query failed, proceeding with camera access');
+                    cameraPermissionState = 'prompt';
+                    lastPermissionCheck = now;
+                    return cameraPermissionState;
+                }
+            }
+
             const recentResults = new Map();
             const RESULT_DEBOUNCE_MS = 1500;
             const RESULT_HISTORY_TTL_MS = 15000;
@@ -538,65 +579,76 @@
                     html5QrcodeInstance = new Html5Qrcode('reader');
                 }
 
-                if (cameraIdOverride) {
-                    preferredCameraId = cameraIdOverride;
-                }
-
+                // Simplified camera configuration - let browser/user choose initially
                 let cameraConfig;
-                if (preferredCameraId) {
-                    cameraConfig = { deviceId: { exact: preferredCameraId } };
+                if (cameraIdOverride) {
+                    cameraConfig = { deviceId: { exact: cameraIdOverride } };
+                    preferredCameraId = cameraIdOverride;
                 } else {
-                    cameraConfig = { facingMode: 'environment' };
+                    // Use facingMode for better mobile compatibility
+                    cameraConfig = { facingMode: { ideal: 'environment' } };
                 }
 
                 const config = {
-                    fps: 15,
-                    qrbox: { width: 250, height: 250 },
-                    aspectRatio: 1.0,
-                    experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+                    fps: 10, // Reduced FPS for better mobile performance
+                    qrbox: function (viewfinderWidth, viewfinderHeight) {
+                        // Dynamic qrbox sizing for better mobile responsiveness
+                        const minEdgePercentage = 0.7;
+                        const minEdgeSize = Math.min(viewfinderWidth, viewfinderHeight);
+                        const qrboxSize = Math.floor(minEdgeSize * minEdgePercentage);
+                        return {
+                            width: qrboxSize,
+                            height: qrboxSize
+                        };
+                    },
+                    aspectRatio: 1.0
                 };
 
+                // Simplified format support for better compatibility
                 if (typeof Html5QrcodeSupportedFormats !== 'undefined') {
                     const formats = Html5QrcodeSupportedFormats;
                     config.formatsToSupport = [
-                        formats.CODE_128,
-                        formats.CODE_39,
-                        formats.CODE_93,
-                        formats.ITF,
-                        formats.CODABAR,
+                        formats.QR_CODE,
                         formats.EAN_13,
                         formats.EAN_8,
+                        formats.CODE_128,
+                        formats.CODE_39,
                         formats.UPC_A,
-                        formats.UPC_E,
-                        formats.QR_CODE,
-                        formats.DATA_MATRIX,
-                        formats.PDF_417
+                        formats.UPC_E
                     ];
                 }
 
                 await html5QrcodeInstance.start(cameraConfig, config, onScanSuccess, onScanError);
 
-                // Only sync and refresh camera list AFTER successful start to avoid double permission requests
-                syncActiveHtml5CameraFromTrack();
-
-                // Refresh camera list in background without awaiting to avoid blocking
-                refreshHtml5CameraList().catch(err => {
-                    console.warn('Failed to refresh camera list:', err);
-                });
-
-                if (!preferredCameraId) {
-                    syncActiveHtml5CameraFromTrack();
-                }
-
                 activeScanner = 'html5-qrcode';
                 isScanning = true;
                 scanButton.textContent = 'Stop Scanning';
+
+                // Simplified camera detection for switch button
+                try {
+                    const cameras = await Html5Qrcode.getCameras();
+                    html5CameraList = cameras || [];
+                    html5HasMultipleCameras = html5CameraList.length > 1;
+
+                    // Find current camera info
+                    const settings = html5QrcodeInstance.getRunningTrackSettings();
+                    if (settings && settings.deviceId) {
+                        preferredCameraId = settings.deviceId;
+                        const currentIndex = html5CameraList.findIndex(cam => cam.id === settings.deviceId);
+                        if (currentIndex >= 0) {
+                            cameraIndex = currentIndex;
+                        }
+                    }
+                } catch (err) {
+                    console.warn('Camera enumeration failed:', err);
+                    html5CameraList = [];
+                    html5HasMultipleCameras = false;
+                }
+
                 const label = describeCameraFromState();
                 setStatus(label ? `Point camera at barcode or QR code (${label})` : 'Point camera at barcode or QR code');
                 updateSwitchCameraButton();
-            }
-
-            async function startBarcodeDetector() {
+            } async function startBarcodeDetector() {
                 ensureReaderActive();
 
                 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -611,14 +663,16 @@
                 readerDiv.appendChild(video);
 
                 try {
-                    const desiredFacingMode = fallbackFacingModes[fallbackFacingIndex] || 'environment';
-                    mediaStream = await navigator.mediaDevices.getUserMedia({
+                    // Simplified camera constraints for better mobile compatibility
+                    const constraints = {
                         video: {
-                            facingMode: { ideal: desiredFacingMode },
-                            width: { ideal: 1280 },
-                            height: { ideal: 720 }
+                            facingMode: { ideal: 'environment' },
+                            width: { ideal: 1280, max: 1920 },
+                            height: { ideal: 720, max: 1080 }
                         }
-                    });
+                    };
+
+                    mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
                 } catch (err) {
                     readerDiv.removeChild(video);
                     // Provide more specific error messages for permission issues
@@ -635,6 +689,13 @@
                 video.srcObject = mediaStream;
                 barcodeVideoElement = video;
 
+                // Wait for video to be ready
+                await new Promise((resolve, reject) => {
+                    video.onloadedmetadata = () => resolve();
+                    video.onerror = () => reject(new Error('Failed to load video stream'));
+                    setTimeout(() => reject(new Error('Video loading timeout')), 10000);
+                });
+
                 const playPromise = video.play();
                 if (playPromise && typeof playPromise.catch === 'function') {
                     playPromise.catch(() => {
@@ -642,19 +703,9 @@
                     });
                 }
 
-                let supportedFormats;
-                if (typeof BarcodeDetector.getSupportedFormats === 'function') {
-                    try {
-                        supportedFormats = await BarcodeDetector.getSupportedFormats();
-                    } catch (err) {
-                        console.warn('Unable to query BarcodeDetector formats:', err);
-                    }
-                }
-
+                // Simplified BarcodeDetector initialization
                 try {
-                    barcodeDetector = supportedFormats && supportedFormats.length
-                        ? new BarcodeDetector({ formats: supportedFormats })
-                        : new BarcodeDetector();
+                    barcodeDetector = new BarcodeDetector();
                 } catch (err) {
                     if (mediaStream) {
                         mediaStream.getTracks().forEach(track => track.stop());
@@ -674,14 +725,15 @@
                 activeScanner = 'barcode-detector';
                 isScanning = true;
                 scanButton.textContent = 'Stop Scanning';
-                const cameraLabel = describeCameraFromState('barcode-detector');
-                setStatus(`Point camera at barcode or QR code (${cameraLabel})`);
+                setStatus('Point camera at barcode or QR code (Back camera)');
+
+                // Simple camera count detection
                 try {
                     const devices = await navigator.mediaDevices.enumerateDevices();
                     const videoInputs = devices.filter(device => device.kind === 'videoinput');
                     fallbackCameraCount = videoInputs.length;
                 } catch (err) {
-                    console.warn('Unable to enumerate video devices:', err);
+                    fallbackCameraCount = 1;
                 }
                 updateSwitchCameraButton();
 
@@ -723,18 +775,15 @@
                 setStatus('Starting camera...');
 
                 try {
-                    // Check camera permission before attempting to start
-                    if (navigator.permissions && navigator.permissions.query) {
-                        try {
-                            const permissionStatus = await navigator.permissions.query({ name: 'camera' });
-                            if (permissionStatus.state === 'denied') {
-                                throw new Error('Camera permission denied. Please enable camera access in your browser settings.');
-                            }
-                        } catch (permErr) {
-                            // Permission API not available or not supported, continue normally
-                            console.log('Permission API not available, proceeding with camera access');
-                        }
+                    // Check camera permission state efficiently
+                    const permissionState = await checkCameraPermission();
+
+                    if (permissionState === 'denied') {
+                        throw new Error('Camera permission denied. Please enable camera access in your browser settings.');
                     }
+
+                    // If permission is 'granted' or 'prompt', proceed with camera access
+                    // The actual permission dialog (if needed) will be triggered by the camera access itself
 
                     if (canUseHtml5Qrcode()) {
                         try {
@@ -834,59 +883,53 @@
                     return;
                 }
 
+                // Simplified camera switching - cycle through available cameras
                 if (html5CameraList.length <= 1) {
-                    await refreshHtml5CameraList();
-                    if (html5CameraList.length <= 1) {
-                        updateSwitchCameraButton();
-                        return;
-                    }
+                    return; // No other cameras to switch to
                 }
 
-                const previousIndex = cameraIndex;
-                const previousCameraId = preferredCameraId;
+                const currentIndex = cameraIndex >= 0 ? cameraIndex : 0;
+                const nextIndex = (currentIndex + 1) % html5CameraList.length;
+                const nextCamera = html5CameraList[nextIndex];
 
-                cameraIndex = (cameraIndex + 1) % html5CameraList.length;
-                preferredCameraId = html5CameraList[cameraIndex].id;
-
-                const targetLabel = describeCameraFromState('html5-qrcode') || 'selected camera';
                 scanButton.disabled = true;
                 switchCameraButton.disabled = true;
-                setStatus(`Switching to ${targetLabel}...`);
-
-                let encounteredError = false;
-                let restoredPrevious = false;
+                setStatus('Switching camera...');
 
                 try {
                     await stopHtml5Qrcode();
                     isScanning = false;
                     activeScanner = null;
-                    await startHtml5Qrcode(preferredCameraId);
+
+                    // Start with the next camera
+                    cameraIndex = nextIndex;
+                    preferredCameraId = nextCamera.id;
+                    await startHtml5Qrcode(nextCamera.id);
+
+                    const cameraLabel = nextCamera.label || `Camera ${nextIndex + 1}`;
+                    setStatus(`Switched to ${cameraLabel}`, 'success');
+                    setTimeout(() => {
+                        if (isScanning && statusDiv.textContent.startsWith('Switched to')) {
+                            const label = describeCameraFromState();
+                            setStatus(label ? `Point camera at barcode or QR code (${label})` : 'Point camera at barcode or QR code');
+                        }
+                    }, 2000);
+
                 } catch (err) {
-                    encounteredError = true;
                     console.error('Camera switch failed:', err);
-                    cameraIndex = previousIndex;
-                    preferredCameraId = previousCameraId;
+                    setStatus('Camera switch failed. Please try again.', 'error');
 
+                    // Try to restart with original camera
                     try {
+                        cameraIndex = currentIndex;
+                        preferredCameraId = html5CameraList[currentIndex].id;
                         await startHtml5Qrcode(preferredCameraId);
-                        restoredPrevious = true;
                     } catch (restoreErr) {
-                        console.error('Failed to restore previous camera:', restoreErr);
+                        console.error('Failed to restore camera:', restoreErr);
+                        setStatus('Camera error. Please restart scanning.', 'error');
                     }
-
-                    const reason = err && err.message ? `: ${err.message}` : '';
-                    const recoveryNote = restoredPrevious ? ' Restored previous camera.' : '';
-                    setStatus(`Camera switch failed${reason}.${recoveryNote}`, 'error');
                 } finally {
-                    if (!isScanning) {
-                        scanButton.textContent = 'Scan';
-                    }
                     scanButton.disabled = false;
-                    switchCameraButton.disabled = !isScanning;
-                    if (!encounteredError && isScanning && activeScanner === 'html5-qrcode') {
-                        const label = describeCameraFromState();
-                        setStatus(label ? `Point camera at barcode or QR code (${label})` : 'Point camera at barcode or QR code');
-                    }
                     updateSwitchCameraButton();
                 }
             }
@@ -897,51 +940,38 @@
                 }
 
                 if (fallbackCameraCount <= 1) {
-                    return;
+                    return; // No other cameras available
                 }
 
-                const previousFacingIndex = fallbackFacingIndex;
-                fallbackFacingIndex = (fallbackFacingIndex + 1) % fallbackFacingModes.length;
+                // Simple toggle between front and back camera
+                const currentFacing = fallbackFacingModes[fallbackFacingIndex] || 'environment';
+                const nextFacing = currentFacing === 'environment' ? 'user' : 'environment';
 
-                const targetLabel = describeCameraFromState('barcode-detector');
                 scanButton.disabled = true;
                 switchCameraButton.disabled = true;
-                setStatus(`Switching to ${targetLabel}...`);
+                setStatus(`Switching to ${nextFacing === 'user' ? 'front' : 'back'} camera...`);
 
                 stopBarcodeDetector();
                 isScanning = false;
                 activeScanner = null;
 
-                let encounteredError = false;
-                let restoredPrevious = false;
-
                 try {
+                    fallbackFacingIndex = fallbackFacingModes.indexOf(nextFacing);
                     await startBarcodeDetector();
                 } catch (err) {
-                    encounteredError = true;
                     console.error('Camera switch failed:', err);
-                    fallbackFacingIndex = previousFacingIndex;
+                    setStatus('Camera switch failed. Please try again.', 'error');
 
+                    // Try to restore previous camera
                     try {
+                        fallbackFacingIndex = fallbackFacingModes.indexOf(currentFacing);
                         await startBarcodeDetector();
-                        restoredPrevious = true;
                     } catch (restoreErr) {
-                        console.error('Failed to restore previous camera:', restoreErr);
+                        console.error('Failed to restore camera:', restoreErr);
+                        setStatus('Camera error. Please restart scanning.', 'error');
                     }
-
-                    const reason = err && err.message ? `: ${err.message}` : '';
-                    const recoveryNote = restoredPrevious ? ' Restored previous camera.' : '';
-                    setStatus(`Camera switch failed${reason}.${recoveryNote}`, 'error');
                 } finally {
-                    if (!isScanning) {
-                        scanButton.textContent = 'Scan';
-                    }
                     scanButton.disabled = false;
-                    switchCameraButton.disabled = !isScanning;
-                    if (!encounteredError && isScanning && activeScanner === 'barcode-detector') {
-                        const label = describeCameraFromState();
-                        setStatus(`Point camera at barcode or QR code (${label})`);
-                    }
                     updateSwitchCameraButton();
                 }
             }
