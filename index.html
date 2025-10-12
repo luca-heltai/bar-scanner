@@ -764,24 +764,29 @@
                 appendLog('canUseHtml5Qrcode() called');
                 // Check if library loaded and is functional
                 if (window.html5QrcodeLoadError) {
+                    appendLog('canUseHtml5Qrcode: CDN load reported error (window.html5QrcodeLoadError=true)', 'warn');
                     console.log('Html5Qrcode library failed to load from CDN');
                     return false;
                 }
 
                 if (typeof Html5Qrcode === 'undefined') {
+                    appendLog('canUseHtml5Qrcode: Html5Qrcode is undefined (library not loaded)', 'warn');
                     console.log('Html5Qrcode not available');
                     return false;
                 }
 
                 // Additional check to ensure the library is functional
                 try {
-                    // Test if we can create an instance (this shouldn't actually create one)
+                    // Test if we can enumerate cameras
                     if (typeof Html5Qrcode.getCameras !== 'function') {
+                        appendLog('canUseHtml5Qrcode: Html5Qrcode.getCameras not available', 'warn');
                         console.log('Html5Qrcode.getCameras not available');
                         return false;
                     }
+                    appendLog('canUseHtml5Qrcode: Html5Qrcode appears available', 'info');
                     return true;
                 } catch (err) {
+                    appendLog(`canUseHtml5Qrcode: functionality test threw: ${err && err.message ? err.message : err}`, 'warn');
                     console.log('Html5Qrcode functionality test failed:', err);
                     return false;
                 }
@@ -790,16 +795,20 @@
             function canUseBarcodeDetector() {
                 appendLog('canUseBarcodeDetector() called');
                 if (!('BarcodeDetector' in window)) {
+                    appendLog('canUseBarcodeDetector: BarcodeDetector API not found in window', 'warn');
                     console.log('BarcodeDetector API not available');
+                    // Not returning yet — some browsers might not have BarcodeDetector but can use html5-qrcode.
                     return false;
                 }
 
                 // Additional check for mobile compatibility
                 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    appendLog('canUseBarcodeDetector: navigator.mediaDevices.getUserMedia not available', 'warn');
                     console.log('getUserMedia not available');
                     return false;
                 }
 
+                appendLog('canUseBarcodeDetector: BarcodeDetector and getUserMedia available', 'info');
                 return true;
             }
 
@@ -892,14 +901,14 @@
             async function startHtml5Qrcode(cameraIdOverride) {
                 appendLog(`startHtml5Qrcode() called - override: ${cameraIdOverride}`);
                 ensureReaderActive();
-        
-                    // Clear any leftover elements inside reader to avoid collision between
-                    // BarcodeDetector video element and Html5Qrcode's own canvas/video
-                    try {
-                        readerDiv.innerHTML = '';
-                    } catch (e) {
-                        console.warn('Failed to clear reader div before html5-qrcode start', e);
-                    }
+
+                // Clear any leftover elements inside reader to avoid collision between
+                // BarcodeDetector video element and Html5Qrcode's own canvas/video
+                try {
+                    readerDiv.innerHTML = '';
+                } catch (e) {
+                    console.warn('Failed to clear reader div before html5-qrcode start', e);
+                }
 
                 if (!html5QrcodeInstance) {
                     html5QrcodeInstance = new Html5Qrcode('reader');
@@ -949,18 +958,18 @@
                 activeScanner = 'html5-qrcode';
                 isScanning = true;
                 scanButton.textContent = 'Stop Scanning';
-        
-                    try {
-                        await html5QrcodeInstance.start(cameraConfig, config, onScanSuccess, onScanError);
-                        appendLog('startHtml5Qrcode: html5QrcodeInstance started successfully');
-            
-                        activeScanner = 'html5-qrcode';
-                        isScanning = true;
-                        scanButton.textContent = 'Stop Scanning';
-                    } catch (err) {
-                        appendLog(`startHtml5Qrcode: failed to start - ${err && err.message ? err.message : err}`, 'error');
-                        throw err;
-                    }
+
+                try {
+                    await html5QrcodeInstance.start(cameraConfig, config, onScanSuccess, onScanError);
+                    appendLog('startHtml5Qrcode: html5QrcodeInstance started successfully');
+
+                    activeScanner = 'html5-qrcode';
+                    isScanning = true;
+                    scanButton.textContent = 'Stop Scanning';
+                } catch (err) {
+                    appendLog(`startHtml5Qrcode: failed to start - ${err && err.message ? err.message : err}`, 'error');
+                    throw err;
+                }
 
                 // Get camera info from the running instance without triggering new permission requests
                 try {
