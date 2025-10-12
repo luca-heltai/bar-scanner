@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -10,7 +11,7 @@
             margin: 0;
             padding: 0;
         }
-        
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -19,24 +20,24 @@
             flex-direction: column;
             padding: 20px;
         }
-        
+
         .container {
             background: white;
             border-radius: 20px;
             padding: 30px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
             max-width: 600px;
             margin: auto;
             width: 100%;
         }
-        
+
         h1 {
             color: #333;
             text-align: center;
             margin-bottom: 30px;
             font-size: 28px;
         }
-        
+
         #reader {
             width: 100%;
             margin-bottom: 20px;
@@ -44,11 +45,11 @@
             overflow: hidden;
             display: none;
         }
-        
+
         #reader.active {
             display: block;
         }
-        
+
         button {
             width: 100%;
             padding: 18px;
@@ -62,16 +63,16 @@
             transition: transform 0.2s, box-shadow 0.2s;
             margin-bottom: 20px;
         }
-        
+
         button:active {
             transform: scale(0.98);
         }
-        
+
         button:disabled {
             background: #ccc;
             cursor: not-allowed;
         }
-        
+
         textarea {
             width: 100%;
             min-height: 150px;
@@ -83,23 +84,24 @@
             font-family: 'Courier New', monospace;
             background: #f9f9f9;
         }
-        
+
         .status {
             text-align: center;
             margin-top: 15px;
             font-size: 14px;
             color: #666;
         }
-        
+
         .error {
             color: #e74c3c;
         }
-        
+
         .success {
             color: #27ae60;
         }
     </style>
 </head>
+
 <body>
     <div class="container">
         <h1>📱 Bar Scanner</h1>
@@ -109,193 +111,440 @@
         <div id="status" class="status"></div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js" onerror="console.log('CDN failed, using fallback')"></script>
+    <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"
+        onerror="console.log('CDN failed, using fallback')"></script>
     <script>
-        let html5QrcodeScanner = null;
-        let isScanning = false;
-        let stream = null;
-        let barcodeDetector = null;
-        let animationFrameId = null;
-        const scanButton = document.getElementById('scanButton');
-        const resultTextarea = document.getElementById('result');
-        const readerDiv = document.getElementById('reader');
-        const statusDiv = document.getElementById('status');
+        (function () {
+            let html5QrcodeInstance = null;
+            let preferredCameraId = null;
+            let isScanning = false;
+            let barcodeDetector = null;
+            let mediaStream = null;
+            let animationFrameId = null;
+            let activeScanner = null;
+            let successMessageTimeoutId = null;
+            let barcodeVideoElement = null;
 
-        // Check if BarcodeDetector is available for fallback
-        const useBarcodeDetector = !window.Html5Qrcode && 'BarcodeDetector' in window;
+            const recentResults = new Map();
+            const RESULT_DEBOUNCE_MS = 1500;
+            const RESULT_HISTORY_TTL_MS = 15000;
 
-        function addResult(decodedText) {
-            // Add the scanned result to the textarea
-            const timestamp = new Date().toLocaleString();
-            const currentText = resultTextarea.value;
-            const newEntry = `[${timestamp}] ${decodedText}\n`;
-            resultTextarea.value = currentText ? newEntry + currentText : newEntry;
-            
-            // Show success message
-            statusDiv.textContent = '✓ Code scanned successfully!';
-            statusDiv.className = 'status success';
-            
-            // Stop scanning after successful scan
-            stopScanning();
-        }
+            const scanButton = document.getElementById('scanButton');
+            const resultTextarea = document.getElementById('result');
+            const readerDiv = document.getElementById('reader');
+            const statusDiv = document.getElementById('status');
 
-        function onScanSuccess(decodedText, decodedResult) {
-            addResult(decodedText);
-        }
+            function setStatus(message, type = 'info') {
+                statusDiv.textContent = message;
 
-        function onScanError(errorMessage) {
-            // Scanning errors are normal when no code is in view
-            // We don't need to show them to avoid cluttering the UI
-        }
+                if (!message) {
+                    statusDiv.className = 'status';
+                    return;
+                }
 
-        // BarcodeDetector fallback implementation
-        async function startBarcodeDetector() {
-            try {
-                // Create video element
+                if (type === 'success') {
+                    statusDiv.className = 'status success';
+                } else if (type === 'error') {
+                    statusDiv.className = 'status error';
+                } else {
+                    statusDiv.className = 'status';
+                }
+            }
+
+            function recordResult(decodedText) {
+                if (!decodedText) {
+                    return false;
+                }
+
+                const normalized = decodedText.trim();
+                if (!normalized) {
+                    return false;
+                }
+
+                const now = Date.now();
+                const lastSeen = recentResults.get(normalized);
+                if (lastSeen && now - lastSeen < RESULT_DEBOUNCE_MS) {
+                    return false;
+                }
+
+                recentResults.set(normalized, now);
+
+                for (const [text, timestamp] of recentResults) {
+                    if (now - timestamp > RESULT_HISTORY_TTL_MS) {
+                        recentResults.delete(text);
+                    }
+                }
+
+                return true;
+            }
+
+            function handleSuccessfulScanUI() {
+                if (successMessageTimeoutId) {
+                    clearTimeout(successMessageTimeoutId);
+                }
+
+                setStatus('✓ Code captured!', 'success');
+                successMessageTimeoutId = setTimeout(() => {
+                    successMessageTimeoutId = null;
+                    if (isScanning) {
+                        setStatus('Point camera at barcode or QR code');
+                    } else if (statusDiv.textContent === '✓ Code captured!') {
+                        setStatus('');
+                    }
+                }, 1200);
+            }
+
+            function addResult(decodedText) {
+                const timestamp = new Date().toLocaleString();
+                const newEntry = `[${timestamp}] ${decodedText}\n`;
+                resultTextarea.value = newEntry + resultTextarea.value;
+                resultTextarea.scrollTop = 0;
+                handleSuccessfulScanUI();
+            }
+
+            function onScanSuccess(decodedText) {
+                if (recordResult(decodedText)) {
+                    addResult(decodedText);
+                }
+            }
+
+            function onScanError() {
+                // Per-frame decode errors are expected; keep the UI quiet.
+            }
+
+            function canUseHtml5Qrcode() {
+                return typeof Html5Qrcode !== 'undefined';
+            }
+
+            function canUseBarcodeDetector() {
+                return 'BarcodeDetector' in window;
+            }
+
+            async function discoverPreferredCamera() {
+                if (!canUseHtml5Qrcode() || typeof Html5Qrcode.getCameras !== 'function') {
+                    return null;
+                }
+
+                try {
+                    const cameras = await Html5Qrcode.getCameras();
+                    if (!cameras || cameras.length === 0) {
+                        return null;
+                    }
+
+                    const rearCamera = cameras.find(camera =>
+                        /back|rear|environment/i.test(camera.label)
+                    );
+
+                    return (rearCamera || cameras[0]).id;
+                } catch (err) {
+                    console.warn('Failed to enumerate cameras:', err);
+                    return null;
+                }
+            }
+
+            function ensureReaderActive() {
+                readerDiv.classList.add('active');
+            }
+
+            function resetReader() {
+                readerDiv.classList.remove('active');
+            }
+
+            function teardownSuccessTimer() {
+                if (successMessageTimeoutId) {
+                    clearTimeout(successMessageTimeoutId);
+                    successMessageTimeoutId = null;
+                }
+            }
+
+            async function startHtml5Qrcode() {
+                ensureReaderActive();
+
+                if (!html5QrcodeInstance) {
+                    html5QrcodeInstance = new Html5Qrcode('reader');
+                }
+
+                if (!preferredCameraId) {
+                    preferredCameraId = await discoverPreferredCamera();
+                }
+
+                const cameraConfig = preferredCameraId
+                    ? { deviceId: { exact: preferredCameraId } }
+                    : { facingMode: 'environment' };
+
+                const config = {
+                    fps: 15,
+                    qrbox: { width: 250, height: 250 },
+                    aspectRatio: 1.0,
+                    experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+                };
+
+                if (typeof Html5QrcodeSupportedFormats !== 'undefined') {
+                    const formats = Html5QrcodeSupportedFormats;
+                    config.formatsToSupport = [
+                        formats.CODE_128,
+                        formats.CODE_39,
+                        formats.CODE_93,
+                        formats.ITF,
+                        formats.CODABAR,
+                        formats.EAN_13,
+                        formats.EAN_8,
+                        formats.UPC_A,
+                        formats.UPC_E,
+                        formats.QR_CODE,
+                        formats.DATA_MATRIX,
+                        formats.PDF_417
+                    ];
+                }
+
+                await html5QrcodeInstance.start(cameraConfig, config, onScanSuccess, onScanError);
+                activeScanner = 'html5-qrcode';
+                isScanning = true;
+                scanButton.textContent = 'Stop Scanning';
+                setStatus('Point camera at barcode or QR code');
+            }
+
+            async function startBarcodeDetector() {
+                ensureReaderActive();
+
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error('Camera access is not supported in this browser.');
+                }
+
                 const video = document.createElement('video');
                 video.style.width = '100%';
                 video.style.borderRadius = '10px';
                 video.autoplay = true;
                 video.playsInline = true;
                 readerDiv.appendChild(video);
-                
-                // Get camera stream
-                stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'environment' }
-                });
-                video.srcObject = stream;
-                
-                // Initialize BarcodeDetector
-                const formats = await BarcodeDetector.getSupportedFormats();
-                barcodeDetector = new BarcodeDetector({ formats });
-                
+
+                try {
+                    mediaStream = await navigator.mediaDevices.getUserMedia({
+                        video: {
+                            facingMode: { ideal: 'environment' },
+                            width: { ideal: 1280 },
+                            height: { ideal: 720 }
+                        }
+                    });
+                } catch (err) {
+                    readerDiv.removeChild(video);
+                    throw err;
+                }
+
+                video.srcObject = mediaStream;
+                barcodeVideoElement = video;
+
+                const playPromise = video.play();
+                if (playPromise && typeof playPromise.catch === 'function') {
+                    playPromise.catch(() => {
+                        // Autoplay can be blocked; the next user interaction will resume playback.
+                    });
+                }
+
+                let supportedFormats;
+                if (typeof BarcodeDetector.getSupportedFormats === 'function') {
+                    try {
+                        supportedFormats = await BarcodeDetector.getSupportedFormats();
+                    } catch (err) {
+                        console.warn('Unable to query BarcodeDetector formats:', err);
+                    }
+                }
+
+                try {
+                    barcodeDetector = supportedFormats && supportedFormats.length
+                        ? new BarcodeDetector({ formats: supportedFormats })
+                        : new BarcodeDetector();
+                } catch (err) {
+                    if (mediaStream) {
+                        mediaStream.getTracks().forEach(track => track.stop());
+                        mediaStream = null;
+                    }
+                    if (video.srcObject) {
+                        video.pause();
+                        video.srcObject = null;
+                    }
+                    if (video.parentElement === readerDiv) {
+                        readerDiv.removeChild(video);
+                    }
+                    barcodeVideoElement = null;
+                    throw err;
+                }
+
+                activeScanner = 'barcode-detector';
                 isScanning = true;
                 scanButton.textContent = 'Stop Scanning';
-                statusDiv.textContent = 'Point camera at barcode or QR code';
-                statusDiv.className = 'status';
-                
-                // Start detection loop
+                setStatus('Point camera at barcode or QR code');
+
                 const detect = async () => {
-                    if (!isScanning) return;
-                    
+                    if (!isScanning || activeScanner !== 'barcode-detector') {
+                        return;
+                    }
+
                     try {
                         const barcodes = await barcodeDetector.detect(video);
                         if (barcodes.length > 0) {
-                            addResult(barcodes[0].rawValue);
-                            return;
+                            const value = barcodes[0].rawValue;
+                            if (recordResult(value)) {
+                                addResult(value);
+                            }
                         }
-                    } catch (e) {
-                        // Detection errors are normal
+                    } catch (err) {
+                        // Detection errors happen while acquiring frames; ignore them.
                     }
-                    
+
                     animationFrameId = requestAnimationFrame(detect);
                 };
-                
+
                 detect();
-            } catch (err) {
-                statusDiv.textContent = `Error: ${err.message}`;
-                statusDiv.className = 'status error';
-                readerDiv.classList.remove('active');
-                console.error('Error starting BarcodeDetector:', err);
             }
-        }
 
-        function stopBarcodeDetector() {
-            if (animationFrameId) {
-                cancelAnimationFrame(animationFrameId);
-                animationFrameId = null;
-            }
-            
-            if (stream) {
-                stream.getTracks().forEach(track => track.stop());
-                stream = null;
-            }
-            
-            // Remove video element
-            const video = readerDiv.querySelector('video');
-            if (video) {
-                readerDiv.removeChild(video);
-            }
-            
-            isScanning = false;
-            scanButton.textContent = 'Scan';
-            readerDiv.classList.remove('active');
-            if (statusDiv.textContent !== '✓ Code scanned successfully!') {
-                statusDiv.textContent = '';
-            }
-        }
+            async function startScanning() {
+                if (isScanning) {
+                    return;
+                }
 
-        function startScanning() {
-            if (isScanning) return;
-            
-            statusDiv.textContent = 'Starting camera...';
-            statusDiv.className = 'status';
-            readerDiv.classList.add('active');
-            
-            if (useBarcodeDetector) {
-                // Use native BarcodeDetector API
-                startBarcodeDetector();
-            } else if (window.Html5Qrcode) {
-                // Use html5-qrcode library
-                const config = {
-                    fps: 10,
-                    qrbox: { width: 250, height: 250 },
-                    aspectRatio: 1.0
-                };
-                
-                html5QrcodeScanner = new Html5Qrcode("reader");
-                
-                html5QrcodeScanner.start(
-                    { facingMode: "environment" },
-                    config,
-                    onScanSuccess,
-                    onScanError
-                ).then(() => {
-                    isScanning = true;
-                    scanButton.textContent = 'Stop Scanning';
-                    statusDiv.textContent = 'Point camera at barcode or QR code';
-                    statusDiv.className = 'status';
-                }).catch((err) => {
-                    statusDiv.textContent = `Error: ${err}`;
-                    statusDiv.className = 'status error';
-                    readerDiv.classList.remove('active');
-                    console.error('Error starting scanner:', err);
-                });
-            } else {
-                statusDiv.textContent = 'Error: No barcode scanning library available';
-                statusDiv.className = 'status error';
-                readerDiv.classList.remove('active');
-            }
-        }
+                scanButton.disabled = true;
+                teardownSuccessTimer();
+                setStatus('Starting camera...');
 
-        function stopScanning() {
-            if (!isScanning) return;
-            
-            if (useBarcodeDetector) {
-                stopBarcodeDetector();
-            } else if (html5QrcodeScanner) {
-                html5QrcodeScanner.stop().then(() => {
-                    isScanning = false;
-                    scanButton.textContent = 'Scan';
-                    readerDiv.classList.remove('active');
-                    if (statusDiv.textContent !== '✓ Code scanned successfully!') {
-                        statusDiv.textContent = '';
+                try {
+                    if (canUseHtml5Qrcode()) {
+                        try {
+                            await startHtml5Qrcode();
+                            return;
+                        } catch (err) {
+                            console.warn('Html5Qrcode failed to start, attempting fallback:', err);
+                            await stopHtml5QrcodeSilently();
+                        }
                     }
-                }).catch((err) => {
-                    console.error('Error stopping scanner:', err);
-                    statusDiv.textContent = `Error stopping: ${err}`;
-                    statusDiv.className = 'status error';
-                });
-            }
-        }
 
-        scanButton.addEventListener('click', () => {
-            if (isScanning) {
-                stopScanning();
-            } else {
-                startScanning();
+                    if (canUseBarcodeDetector()) {
+                        await startBarcodeDetector();
+                        return;
+                    }
+
+                    throw new Error('No barcode scanning capability available on this device.');
+                } catch (err) {
+                    resetReader();
+                    setStatus(`Error: ${err.message || err}`, 'error');
+                } finally {
+                    scanButton.disabled = false;
+                }
             }
-        });
+
+            async function stopHtml5Qrcode() {
+                if (!html5QrcodeInstance) {
+                    return;
+                }
+
+                let capturedError = null;
+
+                try {
+                    await html5QrcodeInstance.stop();
+                } catch (err) {
+                    const message = err && err.message ? err.message : String(err);
+                    if (!/not started|not running/i.test(message)) {
+                        capturedError = err;
+                    }
+                }
+
+                try {
+                    await html5QrcodeInstance.clear();
+                } catch (err) {
+                    if (!capturedError) {
+                        capturedError = err;
+                    }
+                }
+
+                if (capturedError) {
+                    throw capturedError;
+                }
+            }
+
+            async function stopHtml5QrcodeSilently() {
+                try {
+                    await stopHtml5Qrcode();
+                } catch (err) {
+                    console.warn('Failed to fully stop Html5Qrcode:', err);
+                }
+            }
+
+            function stopBarcodeDetector() {
+                if (animationFrameId) {
+                    cancelAnimationFrame(animationFrameId);
+                    animationFrameId = null;
+                }
+
+                if (mediaStream) {
+                    mediaStream.getTracks().forEach(track => track.stop());
+                    mediaStream = null;
+                }
+
+                const video = barcodeVideoElement;
+                barcodeVideoElement = null;
+                if (video) {
+                    if (video.srcObject) {
+                        video.pause();
+                        video.srcObject = null;
+                    }
+                    if (video.parentElement === readerDiv) {
+                        readerDiv.removeChild(video);
+                    }
+                }
+
+                barcodeDetector = null;
+            }
+
+            async function stopScanning() {
+                if (!isScanning) {
+                    return;
+                }
+
+                scanButton.disabled = true;
+                teardownSuccessTimer();
+
+                try {
+                    if (activeScanner === 'html5-qrcode') {
+                        await stopHtml5Qrcode();
+                    } else if (activeScanner === 'barcode-detector') {
+                        stopBarcodeDetector();
+                    }
+                } catch (err) {
+                    console.error('Error stopping scanner:', err);
+                    setStatus(`Error stopping: ${err.message || err}`, 'error');
+                } finally {
+                    isScanning = false;
+                    activeScanner = null;
+                    scanButton.textContent = 'Scan';
+                    scanButton.disabled = false;
+                    resetReader();
+                    if (statusDiv.textContent === 'Point camera at barcode or QR code') {
+                        setStatus('');
+                    }
+                }
+            }
+
+            scanButton.addEventListener('click', async () => {
+                if (scanButton.disabled) {
+                    return;
+                }
+
+                if (isScanning) {
+                    await stopScanning();
+                } else {
+                    await startScanning();
+                }
+            });
+
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden && isScanning) {
+                    stopScanning().catch(err => {
+                        console.warn('Failed to stop scanner on visibility change:', err);
+                    });
+                }
+            });
+        })();
     </script>
 </body>
+
 </html>
