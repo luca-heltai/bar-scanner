@@ -380,6 +380,11 @@
             let fallbackFacingIndex = 0;
             let fallbackCameraCount = 0;
 
+            // EAN-first strategy: attempt EAN-13 only initially, then fallback
+            const EAN_ONLY_FALLBACK_MS = 5000;
+            let eanFallbackTimer = null;
+            let eanModeActive = false;
+
             // Permission caching to avoid repeated permission checks
             let cameraPermissionState = null;
             let lastPermissionCheck = 0;
@@ -750,6 +755,10 @@
 
             function onScanSuccess(decodedText) {
                 appendLog(`onScanSuccess() called - ${decodedText}`);
+                // Cancel EAN-only fallback if running
+                try { if (eanFallbackTimer) { clearTimeout(eanFallbackTimer); eanFallbackTimer = null; } } catch (e) { }
+                eanModeActive = false;
+
                 if (recordResult(decodedText)) {
                     addResult(decodedText);
                 }
@@ -922,8 +931,8 @@
                 }
             }
 
-            async function startHtml5Qrcode(cameraIdOverride) {
-                appendLog(`startHtml5Qrcode() called - override: ${cameraIdOverride}`);
+            async function startHtml5Qrcode(cameraIdOverride, formatsToSupport) {
+                appendLog(`startHtml5Qrcode() called - override: ${cameraIdOverride} formats:${formatsToSupport ? formatsToSupport.join(',') : 'default'}`);
                 ensureReaderActive();
 
                 // Clear any leftover elements inside reader to avoid collision between
@@ -949,32 +958,42 @@
                 }
 
                 const config = {
-                    fps: 10, // Reduced FPS for better mobile performance
+                    // Slightly higher FPS can improve detection responsiveness on modern mobiles
+                    fps: 15,
+                    // Dynamic qrbox sizing with clamps — on small viewfinders a too-large qrbox
+                    // can reduce detection performance. Clamp to a sensible pixel size.
                     qrbox: function (viewfinderWidth, viewfinderHeight) {
-                        // Dynamic qrbox sizing for better mobile responsiveness
-                        const minEdgePercentage = 0.7;
                         const minEdgeSize = Math.min(viewfinderWidth, viewfinderHeight);
-                        const qrboxSize = Math.floor(minEdgeSize * minEdgePercentage);
+                        // target between 40% and 70% of min edge
+                        const pct = Math.max(0.4, Math.min(0.7, 0.6));
+                        let qrboxSize = Math.floor(minEdgeSize * pct);
+                        // clamp to reasonable pixel sizes to avoid overly large qrbox on tablets
+                        qrboxSize = Math.max(200, Math.min(400, qrboxSize));
                         return {
                             width: qrboxSize,
                             height: qrboxSize
                         };
-                    },
-                    aspectRatio: 1.0
+                    }
                 };
 
                 // Simplified format support for better compatibility
                 if (typeof Html5QrcodeSupportedFormats !== 'undefined') {
                     const formats = Html5QrcodeSupportedFormats;
-                    config.formatsToSupport = [
-                        formats.QR_CODE,
-                        formats.EAN_13,
-                        formats.EAN_8,
-                        formats.CODE_128,
-                        formats.CODE_39,
-                        formats.UPC_A,
-                        formats.UPC_E
-                    ];
+                    if (Array.isArray(formatsToSupport) && formatsToSupport.length > 0) {
+                        // Map string names to constants
+                        config.formatsToSupport = formatsToSupport.map(name => formats[name]).filter(Boolean);
+                    } else {
+                        // Default set (include EAN_13 near the front)
+                        config.formatsToSupport = [
+                            formats.QR_CODE,
+                            formats.EAN_13,
+                            formats.EAN_8,
+                            formats.CODE_128,
+                            formats.CODE_39,
+                            formats.UPC_A,
+                            formats.UPC_E
+                        ];
+                    }
                 }
 
                 try {
@@ -1150,11 +1169,28 @@
 
                     if (canUseHtml5Qrcode()) {
                         try {
-                            await startHtml5Qrcode();
+                            // Start with EAN-13 focused mode first
+                            eanModeActive = true;
+                            await startHtml5Qrcode(null, ['EAN_13']);
+
+                            // Setup fallback: if no successful scan in EAN_ONLY_FALLBACK_MS, restart with full formats
+                            clearTimeout(eanFallbackTimer);
+                            eanFallbackTimer = setTimeout(async () => {
+                                try {
+                                    appendLog('EAN-only timeout reached; restarting with broader formats');
+                                    await stopHtml5QrcodeSilently();
+                                    eanModeActive = false;
+                                    await startHtml5Qrcode();
+                                } catch (e) {
+                                    console.warn('Failed to fallback to broader formats:', e);
+                                }
+                            }, EAN_ONLY_FALLBACK_MS);
+
                             return;
                         } catch (err) {
                             console.warn('Html5Qrcode failed to start, attempting fallback:', err);
                             await stopHtml5QrcodeSilently();
+                            eanModeActive = false;
                         }
                     } else {
                         console.log('Html5Qrcode not available, checking fallback options');
@@ -1383,6 +1419,9 @@
                 } finally {
                     isScanning = false;
                     activeScanner = null;
+                    // clear any EAN fallback timer
+                    try { if (eanFallbackTimer) { clearTimeout(eanFallbackTimer); eanFallbackTimer = null; } } catch (e) { }
+                    eanModeActive = false;
                     scanButton.textContent = 'Scan';
                     scanButton.disabled = false;
                     switchCameraButton.disabled = true;
