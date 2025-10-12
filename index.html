@@ -757,6 +757,8 @@
                 appendLog(`onScanSuccess() called - ${decodedText}`);
                 // Cancel EAN-only fallback if running
                 try { if (eanFallbackTimer) { clearTimeout(eanFallbackTimer); eanFallbackTimer = null; } } catch (e) { }
+                // Flush any suppressed EAN errors since we just got a real result
+                flushEanSuppressed();
                 eanModeActive = false;
 
                 if (recordResult(decodedText)) {
@@ -768,10 +770,36 @@
             let _lastScanErrorMsg = null;
             let _lastScanErrorTime = 0;
             let _scanErrorBurst = 0;
+            // EAN-specific suppression counters (to avoid flooding UI while EAN-only mode is active)
+            let _eanDecodeSuppressCount = 0;
+            let _lastEanSummaryTime = 0;
+            // Track whether we already logged the first EAN failure (so we keep one concrete example)
+            let _eanFirstErrorLogged = false;
             function onScanError(err) {
                 // err may be a string or Error-like
                 const now = Date.now();
                 const msg = err && err.message ? err.message : String(err || 'decode error');
+
+                // If running in EAN-only mode, the html5-qrcode decoder may repeatedly
+                // report the generic "No MultiFormat Readers were able to detect the code"
+                // message while trying to decode non-EAN inputs. Suppress the noisy
+                // repeated messages and emit a short periodic summary instead.
+                if (eanModeActive && /No MultiFormat Readers/i.test(msg)) {
+                    // Log the first concrete EAN-related error once so there's an example
+                    if (!_eanFirstErrorLogged) {
+                        appendLog(`onScanError (first EAN failure): ${msg}`, 'warn');
+                        _eanFirstErrorLogged = true;
+                    }
+                    _eanDecodeSuppressCount += 1;
+                    // Emit a short summary at most once every 2 seconds to keep the log useful
+                    if (now - _lastEanSummaryTime > 2000) {
+                        appendLog(`EAN-only decode failures: ${_eanDecodeSuppressCount} suppressed so far`, 'warn');
+                        _eanDecodeSuppressCount = 0;
+                        _lastEanSummaryTime = now;
+                    }
+                    // Skip the rest of the handler to avoid duplicate logging
+                    return;
+                }
 
                 // If same message repeating quickly, increment burst counter and only log occasionally
                 if (msg === _lastScanErrorMsg && (now - _lastScanErrorTime) < 500) {
@@ -790,6 +818,21 @@
                 // If we're getting continuous decode errors for a while, hint to the user
                 if (_scanErrorBurst > 50) {
                     setStatus('Decoding consistently failing — try better lighting, move camera closer, or rotate the code', 'error');
+                }
+            }
+
+            // Flush any EAN-only suppressed counters and log a short summary.
+            function flushEanSuppressed() {
+                try {
+                    if (_eanFirstErrorLogged || _eanDecodeSuppressCount > 0) {
+                        const suppressed = _eanDecodeSuppressCount;
+                        appendLog(`EAN-only mode ended. First EAN failure was logged and ${suppressed} additional failures were suppressed.`, 'info');
+                        _eanDecodeSuppressCount = 0;
+                        _eanFirstErrorLogged = false;
+                        _lastEanSummaryTime = 0;
+                    }
+                } catch (e) {
+                    // ignore flush errors
                 }
             }
 
@@ -1178,6 +1221,8 @@
                             eanFallbackTimer = setTimeout(async () => {
                                 try {
                                     appendLog('EAN-only timeout reached; restarting with broader formats');
+                                    // Before switching modes, flush suppressed EAN-only errors so the log reflects what happened
+                                    flushEanSuppressed();
                                     await stopHtml5QrcodeSilently();
                                     eanModeActive = false;
                                     await startHtml5Qrcode();
@@ -1421,6 +1466,8 @@
                     activeScanner = null;
                     // clear any EAN fallback timer
                     try { if (eanFallbackTimer) { clearTimeout(eanFallbackTimer); eanFallbackTimer = null; } } catch (e) { }
+                    // Flush any EAN suppressed counts when scanning stops
+                    flushEanSuppressed();
                     eanModeActive = false;
                     scanButton.textContent = 'Scan';
                     scanButton.disabled = false;
