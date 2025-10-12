@@ -1166,9 +1166,14 @@
 
                 setStatus('Point camera at barcode or QR code');
                 updateSwitchCameraButton();
-            } async function startBarcodeDetector() {
+            }
+
+            async function startBarcodeDetector(formatsToSupport) {
                 appendLog('startBarcodeDetector() called');
                 ensureReaderActive();
+
+                // Clear reader to avoid collisions with html5-qrcode elements
+                try { readerDiv.innerHTML = ''; } catch (e) { /* ignore */ }
 
                 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
                     throw new Error('Camera access is not supported in this browser.');
@@ -1224,7 +1229,24 @@
 
                 // Simplified BarcodeDetector initialization
                 try {
-                    barcodeDetector = new BarcodeDetector();
+                    // Map common format names to BarcodeDetector identifiers
+                    const formatMap = {
+                        'EAN_13': 'ean_13', 'EAN-13': 'ean_13', 'ean_13': 'ean_13',
+                        'EAN_8': 'ean_8', 'ean_8': 'ean_8',
+                        'UPC_A': 'upc_a', 'UPC-A': 'upc_a', 'upc_a': 'upc_a',
+                        'UPC_E': 'upc_e', 'UPC-E': 'upc_e', 'upc_e': 'upc_e',
+                        'CODE_128': 'code_128', 'CODE-128': 'code_128', 'code_128': 'code_128',
+                        'CODE_39': 'code_39', 'code_39': 'code_39',
+                        'QR_CODE': 'qr_code', 'QR-CODE': 'qr_code', 'qr_code': 'qr_code'
+                    };
+
+                    let detectorOptions = undefined;
+                    if (Array.isArray(formatsToSupport) && formatsToSupport.length > 0) {
+                        const mapped = formatsToSupport.map(f => formatMap[f] || formatMap[String(f).toUpperCase()] || String(f).toLowerCase()).filter(Boolean);
+                        if (mapped.length > 0) detectorOptions = { formats: mapped };
+                    }
+
+                    barcodeDetector = detectorOptions ? new BarcodeDetector(detectorOptions) : new BarcodeDetector();
                 } catch (err) {
                     if (mediaStream) {
                         mediaStream.getTracks().forEach(track => track.stop());
@@ -1310,9 +1332,43 @@
                     // If permission is 'granted' or 'prompt', proceed with camera access
                     // The actual permission dialog (if needed) will be triggered by the camera access itself
 
+                    // Prefer BarcodeDetector when available (better mobile performance on some devices)
+                    if (canUseBarcodeDetector()) {
+                        try {
+                            // EAN-first with BarcodeDetector
+                            eanModeActive = true;
+                            await startBarcodeDetector(['EAN_13']);
+
+                            clearTimeout(eanFallbackTimer);
+                            eanFallbackTimer = setTimeout(async () => {
+                                try {
+                                    appendLog('EAN-only timeout reached; restarting with broader formats (BarcodeDetector -> html5-qrcode)');
+                                    flushEanSuppressed();
+                                    // Stop barcode detector cleanly
+                                    stopBarcodeDetector();
+                                    eanModeActive = false;
+                                    // Then try html5-qrcode as a broader fallback
+                                    if (canUseHtml5Qrcode()) {
+                                        await startHtml5Qrcode();
+                                    }
+                                } catch (e) {
+                                    console.warn('Failed to fallback to broader formats:', e);
+                                }
+                            }, EAN_ONLY_FALLBACK_MS);
+
+                            return;
+                        } catch (err) {
+                            console.warn('BarcodeDetector failed to start, attempting html5-qrcode fallback:', err);
+                            try { stopBarcodeDetector(); } catch (e) { }
+                            eanModeActive = false;
+                        }
+                    } else {
+                        console.log('BarcodeDetector not available, trying html5-qrcode');
+                    }
+
                     if (canUseHtml5Qrcode()) {
                         try {
-                            // Start with EAN-13 focused mode first
+                            // Start with EAN-13 focused mode first using html5-qrcode
                             eanModeActive = true;
                             await startHtml5Qrcode(null, ['EAN_13']);
 
@@ -1338,18 +1394,7 @@
                             eanModeActive = false;
                         }
                     } else {
-                        console.log('Html5Qrcode not available, checking fallback options');
-                    }
-
-                    if (canUseBarcodeDetector()) {
-                        try {
-                            await startBarcodeDetector();
-                            return;
-                        } catch (err) {
-                            console.warn('BarcodeDetector failed to start:', err);
-                        }
-                    } else {
-                        console.log('BarcodeDetector not available');
+                        console.log('Html5Qrcode not available');
                     }
 
                     // If we get here, provide helpful error message
