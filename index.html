@@ -755,9 +755,33 @@
                 }
             }
 
-            function onScanError() {
-                appendLog('onScanError() called');
-                // Per-frame decode errors are expected; keep the UI quiet.
+            // Throttled, informative scan error handler
+            let _lastScanErrorMsg = null;
+            let _lastScanErrorTime = 0;
+            let _scanErrorBurst = 0;
+            function onScanError(err) {
+                // err may be a string or Error-like
+                const now = Date.now();
+                const msg = err && err.message ? err.message : String(err || 'decode error');
+
+                // If same message repeating quickly, increment burst counter and only log occasionally
+                if (msg === _lastScanErrorMsg && (now - _lastScanErrorTime) < 500) {
+                    _scanErrorBurst += 1;
+                    // log a summary every 10 repeats to avoid flooding the UI
+                    if (_scanErrorBurst % 10 === 0) {
+                        appendLog(`onScanError: ${msg} (repeated ${_scanErrorBurst} times)`, 'warn');
+                    }
+                } else {
+                    _lastScanErrorMsg = msg;
+                    _lastScanErrorTime = now;
+                    _scanErrorBurst = 0;
+                    appendLog(`onScanError: ${msg}`, 'warn');
+                }
+
+                // If we're getting continuous decode errors for a while, hint to the user
+                if (_scanErrorBurst > 50) {
+                    setStatus('Decoding consistently failing — try better lighting, move camera closer, or rotate the code', 'error');
+                }
             }
 
             function canUseHtml5Qrcode() {
