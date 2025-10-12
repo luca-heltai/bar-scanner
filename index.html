@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bar Scanner</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            max-width: 600px;
+            margin: auto;
+            width: 100%;
+        }
+        
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 28px;
+        }
+        
+        #reader {
+            width: 100%;
+            margin-bottom: 20px;
+            border-radius: 10px;
+            overflow: hidden;
+            display: none;
+        }
+        
+        #reader.active {
+            display: block;
+        }
+        
+        button {
+            width: 100%;
+            padding: 18px;
+            font-size: 18px;
+            font-weight: 600;
+            color: white;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin-bottom: 20px;
+        }
+        
+        button:active {
+            transform: scale(0.98);
+        }
+        
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        textarea {
+            width: 100%;
+            min-height: 150px;
+            padding: 15px;
+            font-size: 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            resize: vertical;
+            font-family: 'Courier New', monospace;
+            background: #f9f9f9;
+        }
+        
+        .status {
+            text-align: center;
+            margin-top: 15px;
+            font-size: 14px;
+            color: #666;
+        }
+        
+        .error {
+            color: #e74c3c;
+        }
+        
+        .success {
+            color: #27ae60;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📱 Bar Scanner</h1>
+        <div id="reader"></div>
+        <button id="scanButton">Scan</button>
+        <textarea id="result" readonly placeholder="Scanned codes will appear here..."></textarea>
+        <div id="status" class="status"></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js" onerror="console.log('CDN failed, using fallback')"></script>
+    <script>
+        let html5QrcodeScanner = null;
+        let isScanning = false;
+        let stream = null;
+        let barcodeDetector = null;
+        let animationFrameId = null;
+        const scanButton = document.getElementById('scanButton');
+        const resultTextarea = document.getElementById('result');
+        const readerDiv = document.getElementById('reader');
+        const statusDiv = document.getElementById('status');
+
+        // Check if BarcodeDetector is available for fallback
+        const useBarcodeDetector = !window.Html5Qrcode && 'BarcodeDetector' in window;
+
+        function addResult(decodedText) {
+            // Add the scanned result to the textarea
+            const timestamp = new Date().toLocaleString();
+            const currentText = resultTextarea.value;
+            const newEntry = `[${timestamp}] ${decodedText}\n`;
+            resultTextarea.value = currentText ? newEntry + currentText : newEntry;
+            
+            // Show success message
+            statusDiv.textContent = '✓ Code scanned successfully!';
+            statusDiv.className = 'status success';
+            
+            // Stop scanning after successful scan
+            stopScanning();
+        }
+
+        function onScanSuccess(decodedText, decodedResult) {
+            addResult(decodedText);
+        }
+
+        function onScanError(errorMessage) {
+            // Scanning errors are normal when no code is in view
+            // We don't need to show them to avoid cluttering the UI
+        }
+
+        // BarcodeDetector fallback implementation
+        async function startBarcodeDetector() {
+            try {
+                // Create video element
+                const video = document.createElement('video');
+                video.style.width = '100%';
+                video.style.borderRadius = '10px';
+                video.autoplay = true;
+                video.playsInline = true;
+                readerDiv.appendChild(video);
+                
+                // Get camera stream
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment' }
+                });
+                video.srcObject = stream;
+                
+                // Initialize BarcodeDetector
+                const formats = await BarcodeDetector.getSupportedFormats();
+                barcodeDetector = new BarcodeDetector({ formats });
+                
+                isScanning = true;
+                scanButton.textContent = 'Stop Scanning';
+                statusDiv.textContent = 'Point camera at barcode or QR code';
+                statusDiv.className = 'status';
+                
+                // Start detection loop
+                const detect = async () => {
+                    if (!isScanning) return;
+                    
+                    try {
+                        const barcodes = await barcodeDetector.detect(video);
+                        if (barcodes.length > 0) {
+                            addResult(barcodes[0].rawValue);
+                            return;
+                        }
+                    } catch (e) {
+                        // Detection errors are normal
+                    }
+                    
+                    animationFrameId = requestAnimationFrame(detect);
+                };
+                
+                detect();
+            } catch (err) {
+                statusDiv.textContent = `Error: ${err.message}`;
+                statusDiv.className = 'status error';
+                readerDiv.classList.remove('active');
+                console.error('Error starting BarcodeDetector:', err);
+            }
+        }
+
+        function stopBarcodeDetector() {
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+                animationFrameId = null;
+            }
+            
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+            
+            // Remove video element
+            const video = readerDiv.querySelector('video');
+            if (video) {
+                readerDiv.removeChild(video);
+            }
+            
+            isScanning = false;
+            scanButton.textContent = 'Scan';
+            readerDiv.classList.remove('active');
+            if (statusDiv.textContent !== '✓ Code scanned successfully!') {
+                statusDiv.textContent = '';
+            }
+        }
+
+        function startScanning() {
+            if (isScanning) return;
+            
+            statusDiv.textContent = 'Starting camera...';
+            statusDiv.className = 'status';
+            readerDiv.classList.add('active');
+            
+            if (useBarcodeDetector) {
+                // Use native BarcodeDetector API
+                startBarcodeDetector();
+            } else if (window.Html5Qrcode) {
+                // Use html5-qrcode library
+                const config = {
+                    fps: 10,
+                    qrbox: { width: 250, height: 250 },
+                    aspectRatio: 1.0
+                };
+                
+                html5QrcodeScanner = new Html5Qrcode("reader");
+                
+                html5QrcodeScanner.start(
+                    { facingMode: "environment" },
+                    config,
+                    onScanSuccess,
+                    onScanError
+                ).then(() => {
+                    isScanning = true;
+                    scanButton.textContent = 'Stop Scanning';
+                    statusDiv.textContent = 'Point camera at barcode or QR code';
+                    statusDiv.className = 'status';
+                }).catch((err) => {
+                    statusDiv.textContent = `Error: ${err}`;
+                    statusDiv.className = 'status error';
+                    readerDiv.classList.remove('active');
+                    console.error('Error starting scanner:', err);
+                });
+            } else {
+                statusDiv.textContent = 'Error: No barcode scanning library available';
+                statusDiv.className = 'status error';
+                readerDiv.classList.remove('active');
+            }
+        }
+
+        function stopScanning() {
+            if (!isScanning) return;
+            
+            if (useBarcodeDetector) {
+                stopBarcodeDetector();
+            } else if (html5QrcodeScanner) {
+                html5QrcodeScanner.stop().then(() => {
+                    isScanning = false;
+                    scanButton.textContent = 'Scan';
+                    readerDiv.classList.remove('active');
+                    if (statusDiv.textContent !== '✓ Code scanned successfully!') {
+                        statusDiv.textContent = '';
+                    }
+                }).catch((err) => {
+                    console.error('Error stopping scanner:', err);
+                    statusDiv.textContent = `Error stopping: ${err}`;
+                    statusDiv.className = 'status error';
+                });
+            }
+        }
+
+        scanButton.addEventListener('click', () => {
+            if (isScanning) {
+                stopScanning();
+            } else {
+                startScanning();
+            }
+        });
+    </script>
+</body>
+</html>
