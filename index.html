@@ -270,6 +270,17 @@
                 <button id="clearLogButton" style="width:auto; padding:8px 14px; font-size:13px; margin:0;">Clear
                     Log</button>
             </div>
+            <div id="diagnostics" style="margin-top:12px; display:flex; gap:12px; align-items:center;">
+                <div id="snapshotContainer" style="display:none; flex-direction:column; align-items:flex-end;">
+                    <img id="snapshotImg"
+                        style="max-width:180px; border-radius:8px; border:1px solid #ddd; display:block;"
+                        alt="diagnostic snapshot" />
+                    <a id="snapshotDownload" href="#" download="snapshot.png"
+                        style="font-size:12px; margin-top:6px;">Download snapshot</a>
+                </div>
+                <div id="snapshotNote" style="color:#666; font-size:12px;">Snapshot will appear here when a diagnostic
+                    capture is made.</div>
+            </div>
         </div>
     </div>
 
@@ -780,15 +791,30 @@
                 const now = Date.now();
                 const msg = err && err.message ? err.message : String(err || 'decode error');
 
+                // Normalize the message for deduping and suppression: strip prefixes like
+                // "QR code parse error, error =" and any small status codes like "D:"
+                const canonicalMsg = msg.replace(/^.*error\s*=\s*/i, '').replace(/^\s*[A-Z]:\s*/i, '').trim();
+
                 // If running in EAN-only mode, the html5-qrcode decoder may repeatedly
-                // report the generic "No MultiFormat Readers were able to detect the code"
-                // message while trying to decode non-EAN inputs. Suppress the noisy
-                // repeated messages and emit a short periodic summary instead.
-                if (eanModeActive && /No MultiFormat Readers/i.test(msg)) {
+                // report a few generic messages while trying to decode non-EAN inputs.
+                // Match those against the canonical message to avoid missing slightly
+                // different prefixes or wrappers.
+                if (eanModeActive && (/No MultiFormat Readers/i.test(canonicalMsg) || /No barcode or QR code detected/i.test(canonicalMsg) || /No barcode detected/i.test(canonicalMsg))) {
                     // Log the first concrete EAN-related error once so there's an example
                     if (!_eanFirstErrorLogged) {
                         appendLog(`onScanError (first EAN failure): ${msg}`, 'warn');
                         _eanFirstErrorLogged = true;
+                        // Capture a diagnostic snapshot on the first EAN failure
+                        try {
+                            captureSnapshot().then(ok => {
+                                if (ok) appendLog('Diagnostic snapshot captured', 'info');
+                                else appendLog('Diagnostic snapshot unavailable', 'warn');
+                            }).catch(e => {
+                                appendLog(`Failed to capture snapshot: ${e}`, 'warn');
+                            });
+                        } catch (e) {
+                            // ignore
+                        }
                     }
                     _eanDecodeSuppressCount += 1;
                     // Emit a short summary at most once every 2 seconds to keep the log useful
@@ -802,14 +828,15 @@
                 }
 
                 // If same message repeating quickly, increment burst counter and only log occasionally
-                if (msg === _lastScanErrorMsg && (now - _lastScanErrorTime) < 500) {
+                // Use canonicalMsg for deduping so slight prefix/wrapping differences don't bypass suppression
+                if (canonicalMsg === _lastScanErrorMsg && (now - _lastScanErrorTime) < 500) {
                     _scanErrorBurst += 1;
                     // log a summary every 10 repeats to avoid flooding the UI
                     if (_scanErrorBurst % 10 === 0) {
-                        appendLog(`onScanError: ${msg} (repeated ${_scanErrorBurst} times)`, 'warn');
+                        appendLog(`onScanError: ${canonicalMsg} (repeated ${_scanErrorBurst} times)`, 'warn');
                     }
                 } else {
-                    _lastScanErrorMsg = msg;
+                    _lastScanErrorMsg = canonicalMsg;
                     _lastScanErrorTime = now;
                     _scanErrorBurst = 0;
                     appendLog(`onScanError: ${msg}`, 'warn');
@@ -974,6 +1001,67 @@
                 }
             }
 
+            // Diagnostic snapshot capture: grabs a frame from the active video/canvas
+            async function captureSnapshot() {
+                try {
+                    const snapshotContainer = document.getElementById('snapshotContainer');
+                    const snapshotImg = document.getElementById('snapshotImg');
+                    const snapshotDownload = document.getElementById('snapshotDownload');
+
+                    // Prefer an actual video element we control (barcodeVideoElement)
+                    let sourceElement = null;
+                    if (barcodeVideoElement && barcodeVideoElement instanceof HTMLVideoElement && barcodeVideoElement.readyState >= 2) {
+                        sourceElement = barcodeVideoElement;
+                    }
+
+                    // Fallback: html5-qrcode creates a video or canvas inside #reader — try to locate it
+                    if (!sourceElement) {
+                        const readerEl = document.getElementById('reader');
+                        if (readerEl) {
+                            // video first
+                            const vid = readerEl.querySelector('video');
+                            if (vid && vid instanceof HTMLVideoElement && vid.readyState >= 2) {
+                                sourceElement = vid;
+                            } else {
+                                // Might be using a canvas produced by html5-qrcode
+                                const cvs = readerEl.querySelector('canvas');
+                                if (cvs && cvs instanceof HTMLCanvasElement) {
+                                    // copy from canvas
+                                    const blob = await new Promise((resolve) => cvs.toBlob(resolve, 'image/png'));
+                                    if (!blob) return false;
+                                    const url = URL.createObjectURL(blob);
+                                    snapshotImg.src = url;
+                                    snapshotDownload.href = url;
+                                    snapshotContainer.style.display = 'flex';
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!sourceElement) return false;
+
+                    // Draw video frame to canvas
+                    const canvas = document.createElement('canvas');
+                    canvas.width = sourceElement.videoWidth || 640;
+                    canvas.height = sourceElement.videoHeight || 480;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(sourceElement, 0, 0, canvas.width, canvas.height);
+
+                    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+                    if (!blob) return false;
+                    const url = URL.createObjectURL(blob);
+
+                    snapshotImg.src = url;
+                    snapshotDownload.href = url;
+                    snapshotContainer.style.display = 'flex';
+                    return true;
+                } catch (err) {
+                    console.warn('captureSnapshot failed:', err);
+                    return false;
+                }
+            }
+
             async function startHtml5Qrcode(cameraIdOverride, formatsToSupport) {
                 appendLog(`startHtml5Qrcode() called - override: ${cameraIdOverride} formats:${formatsToSupport ? formatsToSupport.join(',') : 'default'}`);
                 ensureReaderActive();
@@ -1000,18 +1088,30 @@
                     cameraConfig = { facingMode: 'environment' };
                 }
 
+                // Default config values; may be tuned for EAN-only mode below
+                let defaultFps = 15;
+                let qrboxMin = 200;
+                let qrboxMax = 400;
+
+                // If caller explicitly requested EAN-only mode, prefer a slightly
+                // larger qrbox and lower fps to favor robust barcode decoding
+                // (barcodes are often long and need more pixels horizontally).
+                if (Array.isArray(formatsToSupport) && formatsToSupport.length === 1 && formatsToSupport[0] === 'EAN_13') {
+                    defaultFps = 8; // give decoder more time per frame
+                    qrboxMin = 250; // increase minimum qrbox size
+                    qrboxMax = 500; // allow larger qrbox on bigger screens
+                    appendLog('startHtml5Qrcode: using EAN-only tuning (lower fps, larger qrbox)', 'info');
+                }
+
                 const config = {
-                    // Slightly higher FPS can improve detection responsiveness on modern mobiles
-                    fps: 15,
-                    // Dynamic qrbox sizing with clamps — on small viewfinders a too-large qrbox
-                    // can reduce detection performance. Clamp to a sensible pixel size.
+                    fps: defaultFps,
                     qrbox: function (viewfinderWidth, viewfinderHeight) {
                         const minEdgeSize = Math.min(viewfinderWidth, viewfinderHeight);
-                        // target between 40% and 70% of min edge
-                        const pct = Math.max(0.4, Math.min(0.7, 0.6));
+                        // target between 55% and 75% of min edge for EAN focus, otherwise 40-70%
+                        const pct = Array.isArray(formatsToSupport) && formatsToSupport.length === 1 && formatsToSupport[0] === 'EAN_13' ? Math.max(0.55, Math.min(0.75, 0.65)) : Math.max(0.4, Math.min(0.7, 0.6));
                         let qrboxSize = Math.floor(minEdgeSize * pct);
-                        // clamp to reasonable pixel sizes to avoid overly large qrbox on tablets
-                        qrboxSize = Math.max(200, Math.min(400, qrboxSize));
+                        // clamp to reasonable pixel sizes
+                        qrboxSize = Math.max(qrboxMin, Math.min(qrboxMax, qrboxSize));
                         return {
                             width: qrboxSize,
                             height: qrboxSize
