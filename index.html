@@ -920,8 +920,8 @@
                     cameraConfig = { deviceId: { exact: cameraIdOverride } };
                     preferredCameraId = cameraIdOverride;
                 } else {
-                    // Use facingMode for better mobile compatibility
-                    cameraConfig = { facingMode: { ideal: 'environment' } };
+                    // Use facingMode string for html5-qrcode compatibility on some mobiles
+                    cameraConfig = { facingMode: 'environment' };
                 }
 
                 const config = {
