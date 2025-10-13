@@ -6,11 +6,33 @@ document
     .querySelectorAll('[id]')
     .forEach(element => el[element.id] = element)
 
-// also map the viewport (it's a class, not an id)
+// map the viewport (it's a class, not an id)
 el.viewport = document.querySelector('.viewport') || el.viewport
 
-// also map the viewport (it's a class, not an id)
-el.viewport = document.querySelector('.viewport') || el.viewport
+// Simple viewport state machine so UI toggles are deterministic:
+// 'hidden'  - nothing visible
+// 'streaming' - live camera + canvas visible
+// 'captured' - captured image visible (result of successful scan or uploaded image)
+let appState = 'hidden'
+
+function showViewport(state = 'streaming') {
+    try { if (el.viewport) el.viewport.classList.add('active') } catch (e) {}
+    try { if (el.videoBtn) el.videoBtn.className = 'button-primary' } catch (e) {}
+    appState = state
+    try { console.debug && console.debug('showViewport ->', appState) } catch (e) {}
+}
+
+function hideViewport() {
+    try { if (el.viewport) el.viewport.classList.remove('active') } catch (e) {}
+    try { if (el.videoBtn) el.videoBtn.className = '' } catch (e) {}
+    // ensure child media are hidden to avoid visual leftovers
+    try { if (el.img) { el.img.style.display = 'none'; el.img.src = '' } } catch (e) {}
+    try { if (el.canvas) el.canvas.style.display = 'none' } catch (e) {}
+    try { if (el.video) el.video.style.display = 'none' } catch (e) {}
+    appState = 'hidden'
+    try { console.debug && console.debug('hideViewport ->', appState) } catch (e) {}
+}
+
 
 let
     offCanvas,
@@ -22,12 +44,11 @@ let lastSymbols = [];
 
 el.usingOffscreenCanvas.innerText = usingOffscreenCanvas ? 'yes' : 'no'
 
-// hide media initially until user action
 try {
     if (el.canvas) el.canvas.style.display = 'none'
     if (el.img) el.img.style.display = 'none'
     if (el.video) el.video.style.display = 'none'
-    if (el.viewport) el.viewport.style.display = 'none'
+    hideViewport()
 } catch (e) {}
 function isOffscreenCanvasWorking() {
     try {
@@ -75,16 +96,28 @@ function resumeCamera() {
     const banner = el.successBanner
     if (banner) banner.style.display = 'none'
 
+    // Basic capability checks and friendly errors for iOS/Safari
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        el.result.innerText = 'Camera not supported on this device/browser.'
+        return
+    }
+
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+        el.result.innerText = 'Camera access requires HTTPS. Serve the page over HTTPS or use localhost.'
+        return
+    }
+
     // try to re-open camera
     navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment' } })
         .then(stream => {
             const video = el.video
+
+            // Ensure video is muted and plays inline before assigning srcObject (helps iOS autoplay/permission)
+            try { video.muted = true } catch (e) {}
+            try { video.playsInline = true; video.setAttribute('playsinline', '') } catch (e) {}
+
             video.srcObject = stream
             el.videoBtn.className = 'button-primary'
-
-            // Ensure video is muted and plays inline (helps mobile autoplay policies)
-            try { video.muted = true } catch (e) {}
-            try { video.setAttribute('playsinline', '') } catch (e) {}
 
             // Start detection only after the video actually starts playing to avoid
             // the mobile permission popup race where srcObject is set but playback
@@ -119,11 +152,11 @@ function resumeCamera() {
                 // showing the canvas to avoid a transient black area.
                 try {
                     waitForVideoReady(video, 1500).then(() => {
-                            try { if (el.viewport) el.viewport.style.display = 'block' } catch (e) {}
-                            try { if (el.canvas) el.canvas.style.display = 'block' } catch (e) {}
-                            try { if (el.video) el.video.style.display = 'none' } catch (e) {}
-                        detectVideo(true)
-                    })
+                                try { showViewport('streaming') } catch (e) {}
+                                try { if (el.canvas) el.canvas.style.display = 'block' } catch (e) {}
+                                try { if (el.video) el.video.style.display = 'none' } catch (e) {}
+                            detectVideo(true)
+                        })
                 } catch (e) {
                     if (el.canvas) el.canvas.style.display = 'block'
                     if (el.video) el.video.style.display = 'none'
@@ -372,7 +405,7 @@ function detect(source) {
                                     const tmp = document.createElement('canvas')
                                     tmp.width = sw
                                     tmp.height = sh
-                                    const tctx = tmp.getContext('2d')
+                                    const tctx = tmp.getContext('2d', { willReadFrequently: true })
                                     tctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh)
                                     dataUrl = tmp.toDataURL('image/png')
                                 }
@@ -391,6 +424,8 @@ function detect(source) {
                         // hide the live canvas to show the captured image clearly
                         if (el.canvas) el.canvas.style.display = 'none'
                         if (el.video) el.video.style.display = 'none'
+                        // mark state as captured and ensure viewport shows
+                        try { showViewport('captured') } catch (e) {}
                     } catch (e) {
                         // ignore capture errors
                         try {
@@ -402,6 +437,7 @@ function detect(source) {
                             }
                             if (el.canvas) el.canvas.style.display = 'none'
                             if (el.video) el.video.style.display = 'none'
+                                try { showViewport('captured') } catch (e) {}
                         } catch (e2) {
                             // give up
                         }
@@ -422,8 +458,8 @@ function detect(source) {
                         requestId = null
                     }
 
-                    // update video button state
-                    if (el.videoBtn) el.videoBtn.className = ''
+                    // update video button state: keep it active while viewport is visible
+                    // (we use the button as a two-state indicator; showViewport()/hideViewport() manages it)
                 }
 
                 afterPreviousCallFinished = performance.now()
@@ -468,6 +504,7 @@ function detectVideo(active) {
     if (active) {
         // ensure only canvas is visible while scanning
         try {
+                if (el.viewport) showViewport()
             if (el.canvas) el.canvas.style.display = 'block'
             if (el.video) el.video.style.display = 'none'
             if (el.img) el.img.style.display = 'none'
@@ -492,12 +529,14 @@ function detectVideo(active) {
 
 
 function onUrlActive() {
-    if (el.imgUrl.validity.valid) {
-        el.imgBtn.className = el.videoBtn.className = ''
+        if (el.imgUrl.validity.valid) {
+        el.imgBtn.className = ''
+        hideViewport()
         el.imgUrl.className = 'active'
 
         el.img.src = el.imgUrl.value
         try {
+                if (el.viewport) showViewport('captured')
             if (el.img) el.img.style.display = 'block'
             if (el.canvas) el.canvas.style.display = 'none'
             if (el.video) el.video.style.display = 'none'
@@ -511,11 +550,12 @@ el.imgUrl.addEventListener('focus', onUrlActive)
 
 
 el.fileInput.addEventListener('change', event => {
-    el.imgUrl.className = el.videoBtn.className = ''
-    el.imgBtn.className = 'button-primary'
+    el.imgUrl.className = ''
+    // keep only videoBtn as the primary indicator for viewport state
 
     el.img.src = URL.createObjectURL(el.fileInput.files[0])
     try {
+        if (el.viewport) showViewport('captured')
         if (el.img) el.img.style.display = 'block'
         if (el.canvas) el.canvas.style.display = 'none'
         if (el.video) el.video.style.display = 'none'
@@ -531,76 +571,10 @@ el.imgBtn.addEventListener('click', event => {
 
 
 el.videoBtn.addEventListener('click', event => {
-    if (!requestId) {
-        navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment' } })
-            .then(stream => {
-                el.imgUrl.className = el.imgBtn.className = ''
-                el.videoBtn.className = 'button-primary'
-
-                const video = el.video
-                video.srcObject = stream
-
-                // Ensure muted/playsinline to maximize autoplay chances on mobile
-                try { video.muted = true } catch (e) {}
-                try { video.setAttribute('playsinline', '') } catch (e) {}
-
-                // Wait for playback to start before beginning detection so
-                // canvas drawImage has valid videoWidth/videoHeight and to
-                // avoid showing an empty/black canvas while the stream warms up.
-                let fallbackTimer = null
-
-                function cleanupAndStart() {
-                    if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null }
-                    video.removeEventListener('loadedmetadata', onLoaded)
-                    video.removeEventListener('playing', onPlaying)
-
-                    // Try to play explicitly; ignore rejected promises.
-                    try {
-                        const p = video.play()
-                        if (p && p.catch) p.catch(() => {})
-                    } catch (e) {}
-
-                    // Hide any captured image and show the canvas where we'll paint
-                    try {
-                        if (el.img) {
-                            el.img.src = ''
-                            el.img.style.display = 'none'
-                        }
-                        if (el.canvas) el.canvas.style.display = 'block'
-                        if (el.video) el.video.style.display = 'none'
-                    } catch (e) {}
-
-                    detectVideo(true)
-                }
-
-                function onLoaded() {
-                    try {
-                        const p = video.play()
-                        if (p && p.then) {
-                            p.then(() => cleanupAndStart()).catch(() => {})
-                        } else {
-                            cleanupAndStart()
-                        }
-                    } catch (e) {
-                        // Wait for 'playing' event or fallback
-                    }
-                }
-
-                function onPlaying() { cleanupAndStart() }
-
-                video.addEventListener('loadedmetadata', onLoaded)
-                video.addEventListener('playing', onPlaying)
-
-                fallbackTimer = setTimeout(() => cleanupAndStart(), 1200)
-            })
-            .catch(error => {
-                el.result.innerText = JSON.stringify(error)
-                el.timing.className = ''
-            })
-
-    } else {
+    // Deterministic three-state behavior driven by appState
+    if (appState === 'streaming') {
+        // stop camera and hide everything
         el.imgUrl.className = el.imgBtn.className = el.videoBtn.className = ''
-        // stop scanning loop and hide canvas/video
         detectVideo(false)
         try {
             if (el.video && el.video.srcObject) {
@@ -610,6 +584,89 @@ el.videoBtn.addEventListener('click', event => {
         } catch (e) {}
         try { if (el.canvas) el.canvas.style.display = 'none' } catch (e) {}
         try { if (el.video) el.video.style.display = 'none' } catch (e) {}
-        try { if (el.viewport) el.viewport.style.display = 'none' } catch (e) {}
+        try { hideViewport() } catch (e) {}
+        return
     }
+
+    if (appState === 'captured') {
+        // Hide captured image and viewport
+        el.imgUrl.className = ''
+        el.imgBtn.className = ''
+        try { if (el.img) { el.img.style.display = 'none'; el.img.src = '' } } catch (e) {}
+        try { if (el.canvas) el.canvas.style.display = 'none' } catch (e) {}
+        try { if (el.video) el.video.style.display = 'none' } catch (e) {}
+        try { hideViewport() } catch (e) {}
+        return
+    }
+
+    // appState === 'hidden' -> start camera
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        el.result.innerText = 'Camera not supported on this device/browser.'
+        return
+    }
+
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+        el.result.innerText = 'Camera access requires HTTPS. Serve the page over HTTPS or use localhost.'
+        return
+    }
+
+    navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment' } })
+        .then(stream => {
+            el.imgUrl.className = el.imgBtn.className = ''
+            el.videoBtn.className = 'button-primary'
+
+            const video = el.video
+            // Ensure muted/playsinline before assigning srcObject (helps iOS)
+            try { video.muted = true } catch (e) {}
+            try { video.playsInline = true; video.setAttribute('playsinline', '') } catch (e) {}
+            video.srcObject = stream
+
+            let fallbackTimer = null
+
+            function cleanupAndStart() {
+                if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null }
+                video.removeEventListener('loadedmetadata', onLoaded)
+                video.removeEventListener('playing', onPlaying)
+
+                try {
+                    const p = video.play()
+                    if (p && p.catch) p.catch(() => {})
+                } catch (e) {}
+
+                try {
+                    if (el.img) {
+                        el.img.src = ''
+                        el.img.style.display = 'none'
+                    }
+                    if (el.canvas) el.canvas.style.display = 'block'
+                    if (el.video) el.video.style.display = 'none'
+                    try { showViewport('streaming') } catch (e) {}
+                } catch (e) {}
+
+                detectVideo(true)
+            }
+
+            function onLoaded() {
+                try {
+                    const p = video.play()
+                    if (p && p.then) {
+                        p.then(() => cleanupAndStart()).catch(() => {})
+                    } else {
+                        cleanupAndStart()
+                    }
+                } catch (e) {}
+            }
+
+            function onPlaying() { cleanupAndStart() }
+
+            video.addEventListener('loadedmetadata', onLoaded)
+            video.addEventListener('playing', onPlaying)
+
+            fallbackTimer = setTimeout(() => cleanupAndStart(), 1200)
+        })
+        .catch(error => {
+            el.result.innerText = JSON.stringify(error)
+            el.timing.className = ''
+            console.warn('getUserMedia error (videoBtn):', error)
+        })
 })
