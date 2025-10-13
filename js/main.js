@@ -16,7 +16,12 @@ let lastSymbols = [];
 
 el.usingOffscreenCanvas.innerText = usingOffscreenCanvas ? 'yes' : 'no'
 
-
+// hide media initially until user action
+try {
+    if (el.canvas) el.canvas.style.display = 'none'
+    if (el.img) el.img.style.display = 'none'
+    if (el.video) el.video.style.display = 'none'
+} catch (e) {}
 function isOffscreenCanvasWorking() {
     try {
         return Boolean((new OffscreenCanvas(1, 1)).getContext('2d'))
@@ -38,6 +43,23 @@ function tryShowSuccessBanner(symbols) {
 
     textEl.innerText = `Decoded: ${display}`
     banner.style.display = 'block'
+}
+
+// Wait until the video element reports non-zero dimensions or timeout.
+function waitForVideoReady(video, timeout = 2000) {
+    return new Promise((resolve) => {
+        if (!video) return resolve()
+
+        const start = performance.now()
+
+        function check() {
+            if (video.videoWidth > 0 && video.videoHeight > 0) return resolve()
+            if (performance.now() - start > timeout) return resolve()
+            requestAnimationFrame(check)
+        }
+
+        check()
+    })
 }
 
 
@@ -78,17 +100,28 @@ function resumeCamera() {
                     // ignore
                 }
 
-                // Hide any captured image and show live canvas/video for detection
+                // Hide any captured image and wait for the video to be ready
                 try {
                     if (el.img) {
                         el.img.src = ''
                         el.img.style.display = 'none'
                     }
-                    if (el.canvas) el.canvas.style.display = 'block'
-                    if (el.video) el.video.style.display = 'block'
                 } catch (e) {}
 
-                detectVideo(true)
+                // Wait for the video element to report valid dimensions before
+                // showing the canvas to avoid a transient black area.
+                try {
+                    waitForVideoReady(video, 1500).then(() => {
+                            try { if (el.viewport) el.viewport.style.display = 'block' } catch (e) {}
+                            try { if (el.canvas) el.canvas.style.display = 'block' } catch (e) {}
+                            try { if (el.video) el.video.style.display = 'none' } catch (e) {}
+                        detectVideo(true)
+                    })
+                } catch (e) {
+                    if (el.canvas) el.canvas.style.display = 'block'
+                    if (el.video) el.video.style.display = 'none'
+                    detectVideo(true)
+                }
             }
 
             function onLoaded() {
@@ -292,6 +325,7 @@ function detect(source) {
                                 sym.points.forEach(p => {
                                     if (typeof p.x === 'number' && typeof p.y === 'number') {
                                         const sx = (globalMaxX <= 1 && globalMaxY <= 1) ? (p.x * canvas.width) : p.x
+                                try { if (el.viewport) el.viewport.style.display = 'none' } catch (e) {}
                                         const sy = (globalMaxX <= 1 && globalMaxY <= 1) ? (p.y * canvas.height) : p.y
                                         allPts.push({ x: sx, y: sy })
                                     }
@@ -426,6 +460,12 @@ function detectImg() {
 
 function detectVideo(active) {
     if (active) {
+        // ensure only canvas is visible while scanning
+        try {
+            if (el.canvas) el.canvas.style.display = 'block'
+            if (el.video) el.video.style.display = 'none'
+            if (el.img) el.img.style.display = 'none'
+        } catch (e) {}
         detect(el.video)
             .then(() => {
                 // Only schedule the next frame if the video stream is still active.
@@ -439,6 +479,8 @@ function detectVideo(active) {
     } else {
         cancelAnimationFrame(requestId)
         requestId = null
+        // hide canvas when stopping scanning
+        try { if (el.canvas) el.canvas.style.display = 'none' } catch (e) {}
     }
 }
 
@@ -449,6 +491,11 @@ function onUrlActive() {
         el.imgUrl.className = 'active'
 
         el.img.src = el.imgUrl.value
+        try {
+            if (el.img) el.img.style.display = 'block'
+            if (el.canvas) el.canvas.style.display = 'none'
+            if (el.video) el.video.style.display = 'none'
+        } catch (e) {}
         detectImg()
     }
 }
@@ -462,6 +509,11 @@ el.fileInput.addEventListener('change', event => {
     el.imgBtn.className = 'button-primary'
 
     el.img.src = URL.createObjectURL(el.fileInput.files[0])
+    try {
+        if (el.img) el.img.style.display = 'block'
+        if (el.canvas) el.canvas.style.display = 'none'
+        if (el.video) el.video.style.display = 'none'
+    } catch (e) {}
     el.fileInput.value = null
     detectImg()
 })
@@ -479,8 +531,61 @@ el.videoBtn.addEventListener('click', event => {
                 el.imgUrl.className = el.imgBtn.className = ''
                 el.videoBtn.className = 'button-primary'
 
-                el.video.srcObject = stream
-                detectVideo(true)
+                const video = el.video
+                video.srcObject = stream
+
+                // Ensure muted/playsinline to maximize autoplay chances on mobile
+                try { video.muted = true } catch (e) {}
+                try { video.setAttribute('playsinline', '') } catch (e) {}
+
+                // Wait for playback to start before beginning detection so
+                // canvas drawImage has valid videoWidth/videoHeight and to
+                // avoid showing an empty/black canvas while the stream warms up.
+                let fallbackTimer = null
+
+                function cleanupAndStart() {
+                    if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null }
+                    video.removeEventListener('loadedmetadata', onLoaded)
+                    video.removeEventListener('playing', onPlaying)
+
+                    // Try to play explicitly; ignore rejected promises.
+                    try {
+                        const p = video.play()
+                        if (p && p.catch) p.catch(() => {})
+                    } catch (e) {}
+
+                    // Hide any captured image and show the canvas where we'll paint
+                    try {
+                        if (el.img) {
+                            el.img.src = ''
+                            el.img.style.display = 'none'
+                        }
+                        if (el.canvas) el.canvas.style.display = 'block'
+                        if (el.video) el.video.style.display = 'none'
+                    } catch (e) {}
+
+                    detectVideo(true)
+                }
+
+                function onLoaded() {
+                    try {
+                        const p = video.play()
+                        if (p && p.then) {
+                            p.then(() => cleanupAndStart()).catch(() => {})
+                        } else {
+                            cleanupAndStart()
+                        }
+                    } catch (e) {
+                        // Wait for 'playing' event or fallback
+                    }
+                }
+
+                function onPlaying() { cleanupAndStart() }
+
+                video.addEventListener('loadedmetadata', onLoaded)
+                video.addEventListener('playing', onPlaying)
+
+                fallbackTimer = setTimeout(() => cleanupAndStart(), 1200)
             })
             .catch(error => {
                 el.result.innerText = JSON.stringify(error)
@@ -489,7 +594,16 @@ el.videoBtn.addEventListener('click', event => {
 
     } else {
         el.imgUrl.className = el.imgBtn.className = el.videoBtn.className = ''
-
+        // stop scanning loop and hide canvas/video
         detectVideo(false)
+        try {
+            if (el.video && el.video.srcObject) {
+                el.video.srcObject.getTracks().forEach(t => t.stop())
+                el.video.srcObject = null
+            }
+        } catch (e) {}
+        try { if (el.canvas) el.canvas.style.display = 'none' } catch (e) {}
+        try { if (el.video) el.video.style.display = 'none' } catch (e) {}
+            try { if (el.viewport) el.viewport.style.display = 'none' } catch (e) {}
     }
 })

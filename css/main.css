@@ -1,10 +1,58 @@
-.container {
-    margin-top: 1em;
+/* Reset small defaults */
+* {
+    box-sizing: border-box;
 }
 
-h5,
+html,
+body {
+    height: 100%;
+}
+
+body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    /* strong diagonal gradient background */
+    background: linear-gradient(135deg, #5b6ee6 0%, #7b50b8 35%, #c86fd8 100%) center/cover no-repeat fixed;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    min-height: 100vh;
+    display: flex;
+    align-items: flex-start;
+    /* anchor to top so the container header is not cropped */
+    justify-content: center;
+    padding: 24px;
+}
+
+/* make sure html also shows gradient behind everything */
+html {
+    background: linear-gradient(135deg, #5b6ee6 0%, #7b50b8 35%, #c86fd8 100%) center/cover no-repeat fixed;
+}
+
+.container {
+    background: #fff;
+    border-radius: 16px;
+    padding: calc(28px + env(safe-area-inset-top, 0px)) 28px 28px 28px;
+    margin-top: 12px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+    width: 100%;
+    max-width: 760px;
+}
+
+h4 {
+    font-size: 22px;
+    margin: 0 0 14px 0;
+    color: #222;
+    text-align: center;
+}
+
+h5 {
+    margin: 14px 0 8px 0;
+    color: #444
+}
+
 p {
-    margin-top: 0.5em;
+    margin: 8px 0;
+    color: #666
 }
 
 label {
@@ -12,53 +60,194 @@ label {
 }
 
 .viewport {
-    display: inline-block;
+    width: 100%;
+    height: auto;
     position: relative;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #111;
+    display: block;
+    margin: 12px 0 8px 0;
+    min-height: 220px;
 }
 
-img,
-video,
-#note,
-#timing {
-    display: none;
-    max-width: 100%;
+/* Hide the viewport entirely until user action shows it (JS toggles inline style) */
+.viewport[style*="display: none"] {
+    min-height: 0;
+    height: 0;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    border-radius: 0;
+}
+
+.viewport>img,
+.viewport>video,
+.viewport>canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    object-fit: cover;
+}
+
+#note {
+    color: #999;
+    font-size: 13px;
+    margin-top: 8px
 }
 
 #imgUrl {
-    width: 25em;
-    max-width: 100%;
-}
-
-#imgUrl.active {
-    color: #ffffff;
-    background-color: #33C3F0;
-}
-
-#imgUrl.active~.viewport>#img,
-#imgUrl.active~#note,
-#imgBtn.button-primary~.viewport>#img,
-#videoBtn.button-primary~.viewport>#video,
-#timing.visible {
-    display: block;
-}
-
-#canvas {
-    position: absolute;
-    left: 0;
-    top: 0;
     width: 100%;
-    height: 100%;
+    padding: 10px 12px;
+    border: 1px solid #e6e6e6;
+    border-radius: 10px;
+    margin-bottom: 10px;
+}
+
+/* buttons */
+button,
+.button {
+    display: inline-block;
+    padding: 12px 14px;
+    font-size: 15px;
+    font-weight: 600;
+    color: #fff;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: transform .12s ease, box-shadow .12s ease, opacity .12s ease;
+}
+
+button:active,
+.button:active {
+    transform: scale(0.99)
+}
+
+button[disabled],
+.button[disabled] {
+    opacity: .6;
+    cursor: not-allowed
+}
+
+.button-primary {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+
+/* layout for the top controls - vertical stacked rows */
+.controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 14px;
+}
+
+.controls .control-row {
+    width: 100%;
+}
+
+.controls .control-row input[type="url"],
+.controls .control-row select,
+.controls .control-row button {
+    width: 100%;
+    min-height: 44px;
+}
+
+.controls .control-row.control-inline {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.controls .control-row.control-inline select {
+    width: auto;
+    flex: 1;
+}
+
+.controls .control-row.control-inline label {
+    margin-left: 8px;
+}
+
+/* Ensure controls' buttons center their label and inputs/select align vertically */
+.controls .control-row button,
+.controls .control-row .button {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 44px !important;
+    line-height: 1 !important;
+    padding: 0 14px !important;
+    text-transform: none !important;
+}
+
+.controls .control-row input,
+.controls .control-row select,
+.controls .control-row label {
+    display: flex;
+    align-items: center;
+}
+
+/* Stronger override for Skeleton button defaults inside our control rows */
+.controls .control-row button,
+.controls .control-row .button {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 48px !important;
+    line-height: 1 !important;
+    padding: 0 16px !important;
+    font-size: 15px !important;
+    font-weight: 600 !important;
+    text-transform: none !important;
+}
+
+/* Target specific controls */
+#imgBtn,
+#videoBtn {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 48px !important;
+    line-height: 1 !important;
+    padding: 0 16px !important;
+    font-size: 15px !important;
+    font-weight: 600 !important;
+    text-transform: none !important;
 }
 
 #encoding {
-    margin-right: 1em;
+    width: auto;
+    margin-left: 8px
 }
 
-pre {
-    font-size: 1.35rem;
+/* Hide media elements by default until user action shows them */
+#video,
+#img,
+#canvas {
+    display: none;
+}
+
+pre#result {
+    display: block;
+    width: 100%;
+    min-height: 140px;
+    max-height: 360px;
+    overflow: auto;
+    padding: 14px;
+    background: #f7f7f8;
+    border: 1px solid #e6e6e6;
+    border-radius: 10px;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    color: #222;
     white-space: pre-wrap;
-    word-wrap: break-word;
-    margin-top: 0;
+}
+
+#timing {
+    display: block;
+    color: #555;
+    font-size: 13px
 }
 
 /* Success banner */
