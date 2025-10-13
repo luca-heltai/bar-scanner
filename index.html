@@ -54,6 +54,16 @@
             <canvas id="canvas"></canvas>
             <img id="img" crossorigin="anonymous">
             <video id="video" muted autoplay playsinline></video>
+            <!-- Zoom controls placed on the right of the viewport -->
+            <div id="zoomControls" class="zoom-controls" aria-hidden="true">
+                <label for="zoomSelect" class="zoom-label">Zoom</label>
+                <select id="zoomSelect">
+                    <option value="1">1x</option>
+                    <option value="1.5">1.5x</option>
+                    <option value="2">2x</option>
+                    <option value="3">3x</option>
+                </select>
+            </div>
         </div>
 
         <p id="note">If the image does not appear then loading may have been blocked by the server's CORS policy.</p>

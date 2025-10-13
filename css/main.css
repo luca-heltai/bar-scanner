@@ -95,6 +95,34 @@ label {
     object-fit: cover;
 }
 
+/* Zoom controls inside the viewport (right side) */
+.zoom-controls {
+    position: absolute;
+    right: 12px;
+    top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: rgba(0, 0, 0, 0.35);
+    padding: 8px;
+    border-radius: 8px;
+    color: white;
+    z-index: 1000;
+}
+
+.zoom-controls .zoom-label {
+    font-size: 12px;
+    color: #fff;
+}
+
+.zoom-controls select {
+    background: rgba(255, 255, 255, 0.95);
+    color: #111;
+    border: none;
+    padding: 6px 8px;
+    border-radius: 6px;
+}
+
 #note {
     color: #999;
     font-size: 13px;

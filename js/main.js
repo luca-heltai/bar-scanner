@@ -39,6 +39,76 @@ let
     afterPreviousCallFinished,
     requestId = null;
 
+// Keep current video track and zoom state
+let currentVideoTrack = null
+
+function populateZoomOptions(capabilities) {
+    try {
+        if (!el.zoomSelect) return
+        // Clear existing options
+        el.zoomSelect.innerHTML = ''
+
+        // If 'zoom' capability is present and is a range, populate options
+        if (capabilities && typeof capabilities.zoom === 'object') {
+            const zcap = capabilities.zoom
+            const min = zcap.min || 1
+            const max = zcap.max || 1
+            const step = zcap.step || 0.1
+
+            // Build a sensible list: 1x, 1.5x, 2x, 3x (within range)
+            const candidate = [1, 1.5, 2, 3]
+            const vals = candidate.filter(v => v >= min && v <= max)
+            if (vals.length === 0) {
+                // fallback to min and max
+                vals.push(min)
+                if (max !== min) vals.push(max)
+            }
+
+            vals.forEach(v => {
+                const opt = document.createElement('option')
+                opt.value = v
+                opt.innerText = `${v}x`
+                el.zoomSelect.appendChild(opt)
+            })
+
+            el.zoomSelect.disabled = false
+            el.zoomControls && el.zoomControls.setAttribute('aria-hidden', 'false')
+            // restore previously saved zoom if present and supported
+            try {
+                const saved = localStorage.getItem('bar-scanner-zoom')
+                if (saved) {
+                    const asNum = Number(saved)
+                    // if saved value is among the options, select and apply it
+                    const found = Array.from(el.zoomSelect.options).some(o => Number(o.value) === asNum)
+                    if (found) {
+                        el.zoomSelect.value = asNum
+                        applyZoom(asNum)
+                    }
+                }
+            } catch (e) {}
+        } else {
+            // hide/disable if unsupported
+            el.zoomSelect.disabled = true
+            el.zoomControls && el.zoomControls.setAttribute('aria-hidden', 'true')
+        }
+    } catch (e) {}
+}
+
+function applyZoom(zoomValue) {
+    try {
+        if (!currentVideoTrack) return Promise.resolve()
+        // applyConstraints may fail; use ideal for browsers that accept it
+        const constraints = { advanced: [{ zoom: Number(zoomValue) }] }
+        // Some browsers support applying a 'zoom' constraint directly
+        return currentVideoTrack.applyConstraints(constraints).catch(() => {
+            // Try replacing with 'torch' style direct constraint if supported
+            return currentVideoTrack.applyConstraints({ zoom: Number(zoomValue) }).catch(() => {})
+        })
+    } catch (e) {
+        return Promise.resolve()
+    }
+}
+
 // track last decoded symbols for display
 let lastSymbols = [];
 
@@ -117,7 +187,14 @@ function resumeCamera() {
             try { video.playsInline = true; video.setAttribute('playsinline', '') } catch (e) {}
 
             video.srcObject = stream
+            // keep track of the active video track for zoom
+            try { currentVideoTrack = stream.getVideoTracks()[0] } catch (e) { currentVideoTrack = null }
+            try { const caps = currentVideoTrack && currentVideoTrack.getCapabilities ? currentVideoTrack.getCapabilities() : null; populateZoomOptions(caps) } catch (e) {}
             el.videoBtn.className = 'button-primary'
+            try { if (el.videoBtn) el.videoBtn.innerText = 'TURN OFF CAMERA' } catch (e) {}
+            // remember current video track and populate zoom options if available
+            try { currentVideoTrack = stream.getVideoTracks()[0] } catch (e) { currentVideoTrack = null }
+            try { const caps = currentVideoTrack && currentVideoTrack.getCapabilities ? currentVideoTrack.getCapabilities() : null; populateZoomOptions(caps) } catch (e) {}
 
             // Start detection only after the video actually starts playing to avoid
             // the mobile permission popup race where srcObject is set but playback
@@ -450,6 +527,9 @@ function detect(source) {
                             // ignore
                         }
                         el.video.srcObject = null
+                        try { if (el.videoBtn) el.videoBtn.innerText = 'Camera' } catch (e) {}
+                        try { currentVideoTrack = null } catch (e) {}
+                        try { if (el.zoomSelect) el.zoomSelect.disabled = true } catch (e) {}
                     }
 
                     // cancel any pending animation frame
@@ -494,6 +574,8 @@ function detectImg() {
         el.video.srcObject.getTracks().forEach(track => track.stop())
         el.video.srcObject = null
     }
+
+    try { if (el.videoBtn) el.videoBtn.innerText = 'Camera' } catch (e) {}
 
     // FF needs some time to properly update decode()
     setTimeout(() => el.img.decode().then(() => detect(el.img)), 100)
@@ -575,11 +657,14 @@ el.videoBtn.addEventListener('click', event => {
     if (appState === 'streaming') {
         // stop camera and hide everything
         el.imgUrl.className = el.imgBtn.className = el.videoBtn.className = ''
+        try { if (el.videoBtn) el.videoBtn.innerText = 'Camera' } catch (e) {}
         detectVideo(false)
         try {
             if (el.video && el.video.srcObject) {
                 el.video.srcObject.getTracks().forEach(t => t.stop())
                 el.video.srcObject = null
+                try { currentVideoTrack = null } catch (e) {}
+                try { if (el.zoomSelect) el.zoomSelect.disabled = true } catch (e) {}
             }
         } catch (e) {}
         try { if (el.canvas) el.canvas.style.display = 'none' } catch (e) {}
@@ -592,6 +677,7 @@ el.videoBtn.addEventListener('click', event => {
         // Hide captured image and viewport
         el.imgUrl.className = ''
         el.imgBtn.className = ''
+        try { if (el.videoBtn) el.videoBtn.innerText = 'Camera' } catch (e) {}
         try { if (el.img) { el.img.style.display = 'none'; el.img.src = '' } } catch (e) {}
         try { if (el.canvas) el.canvas.style.display = 'none' } catch (e) {}
         try { if (el.video) el.video.style.display = 'none' } catch (e) {}
@@ -670,3 +756,15 @@ el.videoBtn.addEventListener('click', event => {
             console.warn('getUserMedia error (videoBtn):', error)
         })
 })
+
+// wire zoom select handler (if control exists)
+try {
+    if (el.zoomSelect) {
+        el.zoomSelect.disabled = true
+        el.zoomSelect.addEventListener('change', event => {
+            const v = event.target.value
+            try { localStorage.setItem('bar-scanner-zoom', String(v)) } catch (e) {}
+            applyZoom(v)
+        })
+    }
+} catch (e) {}
