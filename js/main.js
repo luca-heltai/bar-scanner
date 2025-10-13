@@ -6,6 +6,12 @@ document
     .querySelectorAll('[id]')
     .forEach(element => el[element.id] = element)
 
+// also map the viewport (it's a class, not an id)
+el.viewport = document.querySelector('.viewport') || el.viewport
+
+// also map the viewport (it's a class, not an id)
+el.viewport = document.querySelector('.viewport') || el.viewport
+
 let
     offCanvas,
     afterPreviousCallFinished,
@@ -21,6 +27,7 @@ try {
     if (el.canvas) el.canvas.style.display = 'none'
     if (el.img) el.img.style.display = 'none'
     if (el.video) el.video.style.display = 'none'
+    if (el.viewport) el.viewport.style.display = 'none'
 } catch (e) {}
 function isOffscreenCanvasWorking() {
     try {
@@ -325,7 +332,6 @@ function detect(source) {
                                 sym.points.forEach(p => {
                                     if (typeof p.x === 'number' && typeof p.y === 'number') {
                                         const sx = (globalMaxX <= 1 && globalMaxY <= 1) ? (p.x * canvas.width) : p.x
-                                try { if (el.viewport) el.viewport.style.display = 'none' } catch (e) {}
                                         const sy = (globalMaxX <= 1 && globalMaxY <= 1) ? (p.y * canvas.height) : p.y
                                         allPts.push({ x: sx, y: sy })
                                     }
@@ -604,6 +610,6 @@ el.videoBtn.addEventListener('click', event => {
         } catch (e) {}
         try { if (el.canvas) el.canvas.style.display = 'none' } catch (e) {}
         try { if (el.video) el.video.style.display = 'none' } catch (e) {}
-            try { if (el.viewport) el.viewport.style.display = 'none' } catch (e) {}
+        try { if (el.viewport) el.viewport.style.display = 'none' } catch (e) {}
     }
 })
