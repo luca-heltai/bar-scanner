@@ -49,9 +49,77 @@ function resumeCamera() {
     // try to re-open camera
     navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment' } })
         .then(stream => {
-            el.video.srcObject = stream
+            const video = el.video
+            video.srcObject = stream
             el.videoBtn.className = 'button-primary'
-            detectVideo(true)
+
+            // Ensure video is muted and plays inline (helps mobile autoplay policies)
+            try { video.muted = true } catch (e) {}
+            try { video.setAttribute('playsinline', '') } catch (e) {}
+
+            // Start detection only after the video actually starts playing to avoid
+            // the mobile permission popup race where srcObject is set but playback
+            // hasn't begun yet.
+            let fallbackTimer = null
+
+            function cleanupAndStart() {
+                if (fallbackTimer) {
+                    clearTimeout(fallbackTimer)
+                    fallbackTimer = null
+                }
+                video.removeEventListener('loadedmetadata', onLoaded)
+                video.removeEventListener('playing', onPlaying)
+
+                // try to play (some browsers require explicit play call)
+                try {
+                    const p = video.play()
+                    if (p && p.catch) p.catch(() => {})
+                } catch (e) {
+                    // ignore
+                }
+
+                // Hide any captured image and show live canvas/video for detection
+                try {
+                    if (el.img) {
+                        el.img.src = ''
+                        el.img.style.display = 'none'
+                    }
+                    if (el.canvas) el.canvas.style.display = 'block'
+                    if (el.video) el.video.style.display = 'block'
+                } catch (e) {}
+
+                detectVideo(true)
+            }
+
+            function onLoaded() {
+                // try to start playback; if it succeeds, we'll get 'playing'
+                try {
+                    const p = video.play()
+                    if (p && p.then) {
+                        p.then(() => {
+                            cleanupAndStart()
+                        }).catch(() => {
+                            // wait for 'playing' event or fallback
+                        })
+                    } else {
+                        cleanupAndStart()
+                    }
+                } catch (e) {
+                    // fall through to waiting for 'playing'
+                }
+            }
+
+            function onPlaying() {
+                cleanupAndStart()
+            }
+
+            video.addEventListener('loadedmetadata', onLoaded)
+            video.addEventListener('playing', onPlaying)
+
+            // Fallback: if neither event fires within a short timeout, start anyway
+            fallbackTimer = setTimeout(() => {
+                cleanupAndStart()
+            }, 1200)
         })
         .catch(err => {
             // show error in result if it fails
@@ -107,14 +175,71 @@ function detect(source) {
             .then(symbols => {
                 const afterScanImageData = performance.now()
 
+                // Ensure the visible canvas contains the image used for decoding.
+                // This is necessary when OffscreenCanvas is used for scanning; the
+                // visible canvas may not have the image drawn on it yet. Draw the
+                // source onto the visible canvas first, then paint overlays.
+                try {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height)
+                    ctx.drawImage(source, 0, 0)
+                } catch (e) {
+                    // ignore if drawing fails for any reason
+                }
+
+                // Detect if symbol points are normalized (0..1) or in pixel coords
+                let globalMaxX = -Infinity, globalMaxY = -Infinity
+                symbols.forEach(sym => {
+                    if (sym.points && Array.isArray(sym.points)) {
+                        sym.points.forEach(p => {
+                            if (typeof p.x === 'number' && typeof p.y === 'number') {
+                                globalMaxX = Math.max(globalMaxX, p.x)
+                                globalMaxY = Math.max(globalMaxY, p.y)
+                            }
+                        })
+                    }
+                })
+
+                const pointsAreNormalized = (globalMaxX <= 1 && globalMaxY <= 1)
+
                 symbols.forEach(symbol => {
-                    const lastPoint = symbol.points[symbol.points.length - 1]
+                    if (!symbol.points || !symbol.points.length) return
+
+                    // Scale points to canvas pixel coordinates if normalized
+                    const pts = symbol.points.map(p => {
+                        if (typeof p.x !== 'number' || typeof p.y !== 'number') return null
+                        return {
+                            x: pointsAreNormalized ? (p.x * canvas.width) : p.x,
+                            y: pointsAreNormalized ? (p.y * canvas.height) : p.y
+                        }
+                    }).filter(Boolean)
+
+                    if (!pts.length) return
+
+                    // Draw polygon overlay
+                    const lastPoint = pts[pts.length - 1]
+                    ctx.beginPath()
                     ctx.moveTo(lastPoint.x, lastPoint.y)
-                    symbol.points.forEach(point => ctx.lineTo(point.x, point.y))
+                    pts.forEach(point => ctx.lineTo(point.x, point.y))
 
                     ctx.lineWidth = Math.max(Math.min(canvas.height, canvas.width) / 100, 1)
                     ctx.strokeStyle = '#00e00060'
                     ctx.stroke()
+
+                    // Compute bounding box for the symbol points and draw a box
+                    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+                    pts.forEach(p => {
+                        minX = Math.min(minX, p.x)
+                        minY = Math.min(minY, p.y)
+                        maxX = Math.max(maxX, p.x)
+                        maxY = Math.max(maxY, p.y)
+                    })
+
+                    if (isFinite(minX) && isFinite(minY) && maxX > minX && maxY > minY) {
+                        const bw = Math.max(Math.min(canvas.height, canvas.width) / 120, 1.5)
+                        ctx.lineWidth = bw
+                        ctx.strokeStyle = '#00e000'
+                        ctx.strokeRect(minX, minY, maxX - minX, maxY - minY)
+                    }
                 })
 
                 symbols.forEach(s => s.rawValue = s.decode(el.encoding.value))
@@ -136,12 +261,111 @@ function detect(source) {
                 el.getImageDataTime.innerText = formatNumber(afterGetImageData - afterDrawImage)
                 el.scanImageDataTime.innerText = formatNumber(afterScanImageData - afterGetImageData)
                 el.timing.className = 'visible'
-                // If we decoded at least one symbol, stop further scanning (stop camera + animation loop)
+                // If we decoded at least one symbol, decide whether to stop further scanning
                 if (symbols && symbols.length > 0) {
+                    // If quality fields are present, require best quality >= 10 to stop.
+                    const qualities = symbols
+                        .map(s => (s && typeof s.quality === 'number') ? s.quality : null)
+                        .filter(q => q !== null)
+
+                    if (qualities.length > 0) {
+                        const best = Math.max(...qualities)
+                        if (best < 10) {
+                            // Low-quality decode: keep scanning. Update result and return.
+                            el.result.innerText = JSON.stringify(symbols, null, 2) + `\n\nNote: best quality=${best} < 10 — continuing scan`;
+                            // leave timing visible and do not stop video/animation
+                            afterPreviousCallFinished = performance.now()
+                            return
+                        }
+                    }
                     lastSymbols = symbols
 
                     // show success banner with the first decoded value
                     tryShowSuccessBanner(symbols)
+                    // capture the canvas (with overlays) and show it as an image
+                    try {
+                        // Determine bounding box around all symbol points using the
+                        // same scaled pixel coordinates we used to draw overlays.
+                        const allPts = []
+                        symbols.forEach(sym => {
+                            if (sym.points && Array.isArray(sym.points)) {
+                                sym.points.forEach(p => {
+                                    if (typeof p.x === 'number' && typeof p.y === 'number') {
+                                        const sx = (globalMaxX <= 1 && globalMaxY <= 1) ? (p.x * canvas.width) : p.x
+                                        const sy = (globalMaxX <= 1 && globalMaxY <= 1) ? (p.y * canvas.height) : p.y
+                                        allPts.push({ x: sx, y: sy })
+                                    }
+                                })
+                            }
+                        })
+
+                        let dataUrl
+
+                        if (allPts.length > 0) {
+                            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+                            allPts.forEach(p => {
+                                minX = Math.min(minX, p.x)
+                                minY = Math.min(minY, p.y)
+                                maxX = Math.max(maxX, p.x)
+                                maxY = Math.max(maxY, p.y)
+                            })
+
+                            if (!(minX !== Infinity && isFinite(minX) && maxX > minX && maxY > minY)) {
+                                // fallback
+                                dataUrl = canvas.toDataURL('image/png')
+                            } else {
+                                // Add 20% margin around the box
+                                const boxW = maxX - minX
+                                const boxH = maxY - minY
+                                const marginX = boxW * 0.2
+                                const marginY = boxH * 0.2
+
+                                let sx = Math.max(0, Math.floor(minX - marginX))
+                                let sy = Math.max(0, Math.floor(minY - marginY))
+                                let sw = Math.min(canvas.width - sx, Math.ceil((maxX + marginX) - sx))
+                                let sh = Math.min(canvas.height - sy, Math.ceil((maxY + marginY) - sy))
+
+                                // Fallback to full canvas if computed box is tiny or invalid
+                                if (sw <= 0 || sh <= 0 || sw < 4 || sh < 4) {
+                                    dataUrl = canvas.toDataURL('image/png')
+                                } else {
+                                    const tmp = document.createElement('canvas')
+                                    tmp.width = sw
+                                    tmp.height = sh
+                                    const tctx = tmp.getContext('2d')
+                                    tctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh)
+                                    dataUrl = tmp.toDataURL('image/png')
+                                }
+                            }
+                        } else {
+                            // No valid points: fallback to full-canvas capture
+                            dataUrl = canvas.toDataURL('image/png')
+                        }
+
+                        if (el.img) {
+                            el.img.src = dataUrl
+                            el.img.style.display = 'block'
+                            el.img.style.width = '100%'
+                        }
+
+                        // hide the live canvas to show the captured image clearly
+                        if (el.canvas) el.canvas.style.display = 'none'
+                        if (el.video) el.video.style.display = 'none'
+                    } catch (e) {
+                        // ignore capture errors
+                        try {
+                            const fallback = canvas.toDataURL('image/png')
+                            if (el.img) {
+                                el.img.src = fallback
+                                el.img.style.display = 'block'
+                                el.img.style.width = '100%'
+                            }
+                            if (el.canvas) el.canvas.style.display = 'none'
+                            if (el.video) el.video.style.display = 'none'
+                        } catch (e2) {
+                            // give up
+                        }
+                    }
                     // stop video stream if active
                     if (el.video && el.video.srcObject) {
                         try {
@@ -166,6 +390,19 @@ function detect(source) {
             })
 
     } else {
+        // If the source is a video element with an active stream, metadata
+        // (videoWidth/videoHeight) may not be available yet. In that case we
+        // should not overwrite the previous result with 'Source not ready' —
+        // just return and let the next animation frame retry.
+        try {
+            if (source && source.tagName && source.tagName.toLowerCase() === 'video' && source.srcObject) {
+                // keep previous el.result content and timing; don't change UI
+                return Promise.resolve()
+            }
+        } catch (e) {
+            // ignore and fallthrough to show message
+        }
+
         el.result.innerText = 'Source not ready'
         el.timing.className = ''
 
