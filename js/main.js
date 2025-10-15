@@ -41,55 +41,60 @@ let
 
 // Keep current video track and zoom state
 let currentVideoTrack = null
+let hardwareZoomAvailable = false
 
 function populateZoomOptions(capabilities) {
+    if (!el.zoomSelect) return
+
+    // Clear existing options
+    el.zoomSelect.innerHTML = ''
+
+    // Build zoom options: use device capabilities when present, otherwise fallback to candidate list (digital zoom)
+    const candidate = [1, 1.5, 2, 3]
+    let vals = []
+    hardwareZoomAvailable = false
+
+    if (capabilities && ('zoom' in capabilities) && (typeof capabilities.zoom === 'object' || typeof capabilities.zoom === 'number')) {
+        const zcap = capabilities.zoom
+        const min = (typeof zcap === 'object' && typeof zcap.min === 'number') ? zcap.min : (typeof zcap === 'number' ? zcap : 1)
+        const max = (typeof zcap === 'object' && typeof zcap.max === 'number') ? zcap.max : (typeof zcap === 'number' ? zcap : 1)
+        const step = (typeof zcap === 'object' && typeof zcap.step === 'number') ? zcap.step : 0.1
+
+        // filter candidates to within hardware range
+        vals = candidate.filter(v => v >= min && v <= max)
+        if (vals.length === 0) {
+            // fallback to min and max
+            vals.push(min)
+            if (max !== min) vals.push(max)
+        }
+        hardwareZoomAvailable = true
+    } else {
+        // no hardware zoom reported — allow candidate list for digital zoom
+        vals = candidate.slice()
+        hardwareZoomAvailable = false
+    }
+
+    vals.forEach(v => {
+        const opt = document.createElement('option')
+        opt.value = v
+        opt.innerText = `${v}x`
+        el.zoomSelect.appendChild(opt)
+    })
+
+    el.zoomSelect.disabled = false
+    try { if (el.zoomControls) el.zoomControls.classList.add('visible') } catch (e) {}
+
+    // restore previously saved zoom if present and supported
     try {
-        if (!el.zoomSelect) return
-        // Clear existing options
-        el.zoomSelect.innerHTML = ''
-
-        // If 'zoom' capability is present and is a range, populate options
-        if (capabilities && typeof capabilities.zoom === 'object') {
-            const zcap = capabilities.zoom
-            const min = zcap.min || 1
-            const max = zcap.max || 1
-            const step = zcap.step || 0.1
-
-            // Build a sensible list: 1x, 1.5x, 2x, 3x (within range)
-            const candidate = [1, 1.5, 2, 3]
-            const vals = candidate.filter(v => v >= min && v <= max)
-            if (vals.length === 0) {
-                // fallback to min and max
-                vals.push(min)
-                if (max !== min) vals.push(max)
+        const saved = localStorage.getItem('bar-scanner-zoom')
+        if (saved) {
+            const asNum = Number(saved)
+            const found = Array.from(el.zoomSelect.options).some(o => Number(o.value) === asNum)
+            if (found) {
+                el.zoomSelect.value = asNum
+                applyZoom(asNum)
+                try { if (!hardwareZoomAvailable) drawPreviewZoom() } catch (e) {}
             }
-
-            vals.forEach(v => {
-                const opt = document.createElement('option')
-                opt.value = v
-                opt.innerText = `${v}x`
-                el.zoomSelect.appendChild(opt)
-            })
-
-            el.zoomSelect.disabled = false
-            el.zoomControls && el.zoomControls.setAttribute('aria-hidden', 'false')
-            // restore previously saved zoom if present and supported
-            try {
-                const saved = localStorage.getItem('bar-scanner-zoom')
-                if (saved) {
-                    const asNum = Number(saved)
-                    // if saved value is among the options, select and apply it
-                    const found = Array.from(el.zoomSelect.options).some(o => Number(o.value) === asNum)
-                    if (found) {
-                        el.zoomSelect.value = asNum
-                        applyZoom(asNum)
-                    }
-                }
-            } catch (e) {}
-        } else {
-            // hide/disable if unsupported
-            el.zoomSelect.disabled = true
-            el.zoomControls && el.zoomControls.setAttribute('aria-hidden', 'true')
         }
     } catch (e) {}
 }
@@ -97,16 +102,52 @@ function populateZoomOptions(capabilities) {
 function applyZoom(zoomValue) {
     try {
         if (!currentVideoTrack) return Promise.resolve()
-        // applyConstraints may fail; use ideal for browsers that accept it
-        const constraints = { advanced: [{ zoom: Number(zoomValue) }] }
-        // Some browsers support applying a 'zoom' constraint directly
-        return currentVideoTrack.applyConstraints(constraints).catch(() => {
-            // Try replacing with 'torch' style direct constraint if supported
-            return currentVideoTrack.applyConstraints({ zoom: Number(zoomValue) }).catch(() => {})
+        const z = Number(zoomValue)
+        console.debug && console.debug('applyZoom ->', z, 'track:', currentVideoTrack)
+        // Try direct zoom constraint first
+        return currentVideoTrack.applyConstraints({ zoom: z }).catch(err1 => {
+            console.debug && console.debug('applyConstraints(zoom) failed:', err1)
+            // Try advanced form
+            return currentVideoTrack.applyConstraints({ advanced: [{ zoom: z }] }).catch(err2 => {
+                console.debug && console.debug('applyConstraints(advanced) failed:', err2)
+                // As last resort, try setting torch-like capability (some browsers expose different keys)
+                return currentVideoTrack.applyConstraints({ advanced: [{ zoom: z }, { focusMode: 'continuous' }] }).catch(() => {})
+            })
         })
     } catch (e) {
         return Promise.resolve()
     }
+}
+
+function getSelectedZoom() {
+    // Default zoom when there's no UI: prefer 2x for tighter framing
+    try {
+        if (el.zoomSelect && !el.zoomSelect.disabled) {
+            const v = Number(el.zoomSelect.value)
+            return (isFinite(v) && v > 0) ? v : 2
+        }
+    } catch (e) {}
+    return 2
+}
+
+function drawPreviewZoom() {
+    try {
+        const canvas = el.canvas
+        const ctx = canvas && canvas.getContext ? canvas.getContext('2d') : null
+        const source = el.video
+        if (!ctx || !source) return
+        const zoom = getSelectedZoom()
+        if (zoom && zoom > 1 && source.videoWidth && source.videoHeight) {
+            const sw = Math.floor(source.videoWidth / zoom)
+            const sh = Math.floor(source.videoHeight / zoom)
+            const sx = Math.floor((source.videoWidth - sw) / 2)
+            const sy = Math.floor((source.videoHeight - sh) / 2)
+            ctx.clearRect(0, 0, canvas.width, canvas.height)
+            ctx.drawImage(source, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
+        } else {
+            try { ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(source, 0, 0) } catch (e) {}
+        }
+    } catch (e) {}
 }
 
 // track last decoded symbols for display
@@ -118,7 +159,6 @@ try {
     if (el.canvas) el.canvas.style.display = 'none'
     if (el.img) el.img.style.display = 'none'
     if (el.video) el.video.style.display = 'none'
-    hideViewport()
 } catch (e) {}
 function isOffscreenCanvasWorking() {
     try {
@@ -187,6 +227,78 @@ function resumeCamera() {
             try { video.playsInline = true; video.setAttribute('playsinline', '') } catch (e) {}
 
             video.srcObject = stream
+
+            // Keep track of the active video track for zoom controls
+            try { currentVideoTrack = stream.getVideoTracks()[0] } catch (e) { currentVideoTrack = null }
+            try {
+                const caps = currentVideoTrack && currentVideoTrack.getCapabilities ? currentVideoTrack.getCapabilities() : null
+                console.debug && console.debug('track capabilities:', caps)
+                try { const settings = currentVideoTrack && currentVideoTrack.getSettings ? currentVideoTrack.getSettings() : null; console.debug && console.debug('track settings:', settings) } catch (e) {}
+                populateZoomOptions(caps)
+                // attempt default 2x hardware zoom where supported
+                try {
+                    applyZoom(2)
+                        .then(() => {
+                            try {
+                                const s = currentVideoTrack && currentVideoTrack.getSettings ? currentVideoTrack.getSettings() : null
+                                if (s && typeof s.zoom === 'number' && s.zoom >= 2) {
+                                    hardwareZoomAvailable = true
+                                }
+                            } catch (e) {}
+                        })
+                        .catch(() => {})
+                } catch (e) {}
+
+                // ImageCapture fallback for devices that expose photo capabilities instead
+                if ((!caps || !('zoom' in caps)) && window.ImageCapture && currentVideoTrack) {
+                    try {
+                        const ic = new ImageCapture(currentVideoTrack)
+                        ic.getPhotoCapabilities().then(photoCaps => {
+                            console.debug && console.debug('photoCapabilities:', photoCaps)
+                            if (photoCaps && (photoCaps.zoom || photoCaps.zoomRatio || photoCaps.imageHeight)) {
+                                hardwareZoomAvailable = true
+                                populateZoomOptions({ zoom: photoCaps.zoom || photoCaps.zoomRatio })
+                            }
+                        }).catch(() => {})
+                    } catch (e) {}
+                }
+            } catch (e) {}
+            // set currentVideoTrack for zoom control and populate options
+            try { currentVideoTrack = stream.getVideoTracks()[0] } catch (e) { currentVideoTrack = null }
+            try {
+                const caps = currentVideoTrack && currentVideoTrack.getCapabilities ? currentVideoTrack.getCapabilities() : null
+                console.debug && console.debug('track capabilities:', caps)
+                try { const settings = currentVideoTrack && currentVideoTrack.getSettings ? currentVideoTrack.getSettings() : null; console.debug && console.debug('track settings:', settings) } catch (e) {}
+                populateZoomOptions(caps)
+                    // attempt default 2x hardware zoom where supported
+                    try {
+                        applyZoom(2)
+                            .then(() => {
+                                try {
+                                    const s = currentVideoTrack && currentVideoTrack.getSettings ? currentVideoTrack.getSettings() : null
+                                    if (s && typeof s.zoom === 'number' && s.zoom >= 2) {
+                                        hardwareZoomAvailable = true
+                                    }
+                                } catch (e) {}
+                            })
+                            .catch(() => {})
+                    } catch (e) {}
+
+                // if no zoom found in getCapabilities, try ImageCapture as a fallback
+                if ((!caps || !('zoom' in caps)) && window.ImageCapture && currentVideoTrack) {
+                    try {
+                        const ic = new ImageCapture(currentVideoTrack)
+                        ic.getPhotoCapabilities().then(photoCaps => {
+                            console.debug && console.debug('photoCapabilities:', photoCaps)
+                            // some implementations expose 'zoom' or 'zoomRatio'
+                                        if (photoCaps && (photoCaps.zoom || photoCaps.zoomRatio || photoCaps.imageHeight)) {
+                                            hardwareZoomAvailable = true
+                                            populateZoomOptions({ zoom: photoCaps.zoom || photoCaps.zoomRatio })
+                            }
+                        }).catch(() => {})
+                    } catch (e) {}
+                }
+            } catch (e) {}
             // keep track of the active video track for zoom
             try { currentVideoTrack = stream.getVideoTracks()[0] } catch (e) { currentVideoTrack = null }
             try { const caps = currentVideoTrack && currentVideoTrack.getCapabilities ? currentVideoTrack.getCapabilities() : null; populateZoomOptions(caps) } catch (e) {}
@@ -313,7 +425,21 @@ function detect(source) {
     if (canvas.height && canvas.width) {
         const offCtx = getOffCtx2d(canvas.width, canvas.height) || ctx
 
-        offCtx.drawImage(source, 0, 0)
+        // Apply digital zoom crop if hardware zoom unsupported or as fallback
+        try {
+            const zoom = getSelectedZoom()
+            if (zoom && zoom > 1 && source.videoWidth && source.videoHeight) {
+                const sw = Math.floor(source.videoWidth / zoom)
+                const sh = Math.floor(source.videoHeight / zoom)
+                const sx = Math.floor((source.videoWidth - sw) / 2)
+                const sy = Math.floor((source.videoHeight - sh) / 2)
+                offCtx.drawImage(source, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
+            } else {
+                offCtx.drawImage(source, 0, 0)
+            }
+        } catch (e) {
+            try { offCtx.drawImage(source, 0, 0) } catch (e2) {}
+        }
 
         const
             afterDrawImage = performance.now(),
@@ -331,7 +457,22 @@ function detect(source) {
                 // source onto the visible canvas first, then paint overlays.
                 try {
                     ctx.clearRect(0, 0, canvas.width, canvas.height)
-                    ctx.drawImage(source, 0, 0)
+                    // If hardware zoom is available, the video frame already reflects zoom.
+                    // Otherwise apply the same digital crop used for offscreen canvas so the preview matches.
+                    if (!hardwareZoomAvailable) {
+                        const zoom = getSelectedZoom()
+                        if (zoom && zoom > 1 && source.videoWidth && source.videoHeight) {
+                            const sw = Math.floor(source.videoWidth / zoom)
+                            const sh = Math.floor(source.videoHeight / zoom)
+                            const sx = Math.floor((source.videoWidth - sw) / 2)
+                            const sy = Math.floor((source.videoHeight - sh) / 2)
+                            ctx.drawImage(source, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
+                        } else {
+                            ctx.drawImage(source, 0, 0)
+                        }
+                    } else {
+                        ctx.drawImage(source, 0, 0)
+                    }
                 } catch (e) {
                     // ignore if drawing fails for any reason
                 }
@@ -530,6 +671,7 @@ function detect(source) {
                         try { if (el.videoBtn) el.videoBtn.innerText = 'Camera' } catch (e) {}
                         try { currentVideoTrack = null } catch (e) {}
                         try { if (el.zoomSelect) el.zoomSelect.disabled = true } catch (e) {}
+                        try { if (el.zoomControls) el.zoomControls.classList.remove('visible') } catch (e) {}
                     }
 
                     // cancel any pending animation frame
@@ -665,6 +807,7 @@ el.videoBtn.addEventListener('click', event => {
                 el.video.srcObject = null
                 try { currentVideoTrack = null } catch (e) {}
                 try { if (el.zoomSelect) el.zoomSelect.disabled = true } catch (e) {}
+                try { if (el.zoomControls) el.zoomControls.classList.remove('visible') } catch (e) {}
             }
         } catch (e) {}
         try { if (el.canvas) el.canvas.style.display = 'none' } catch (e) {}
@@ -757,14 +900,5 @@ el.videoBtn.addEventListener('click', event => {
         })
 })
 
-// wire zoom select handler (if control exists)
-try {
-    if (el.zoomSelect) {
-        el.zoomSelect.disabled = true
-        el.zoomSelect.addEventListener('change', event => {
-            const v = event.target.value
-            try { localStorage.setItem('bar-scanner-zoom', String(v)) } catch (e) {}
-            applyZoom(v)
-        })
-    }
-} catch (e) {}
+// ensure zoomSelect is disabled if present (UI removed)
+try { if (el.zoomSelect) el.zoomSelect.disabled = true } catch (e) {}

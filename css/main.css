@@ -36,6 +36,26 @@ html {
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
     width: 100%;
     max-width: 760px;
+    position: relative;
+    /* needed for the decorative separator */
+    margin-bottom: 50px;
+    /* space between container and page bottom */
+}
+
+/* Decorative separator below the white container to visually separate it
+   from the page background (subtle rounded bar) */
+.container::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: -18px;
+    /* sits just below the container */
+    width: 72%;
+    height: 12px;
+    border-radius: 8px;
+    background: linear-gradient(90deg, rgba(0, 0, 0, 0.06), rgba(0, 0, 0, 0.02));
+    pointer-events: none;
 }
 
 h4 {
@@ -96,32 +116,7 @@ label {
 }
 
 /* Zoom controls inside the viewport (right side) */
-.zoom-controls {
-    position: absolute;
-    right: 12px;
-    top: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    background: rgba(0, 0, 0, 0.35);
-    padding: 8px;
-    border-radius: 8px;
-    color: white;
-    z-index: 1000;
-}
-
-.zoom-controls .zoom-label {
-    font-size: 12px;
-    color: #fff;
-}
-
-.zoom-controls select {
-    background: rgba(255, 255, 255, 0.95);
-    color: #111;
-    border: none;
-    padding: 6px 8px;
-    border-radius: 6px;
-}
+/* zoom controls removed */
 
 #note {
     color: #999;
